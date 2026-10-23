@@ -17,7 +17,7 @@ describe("sandbox manifest", () => {
   });
 
   it("injects credentials from a Secret, never inline", () => {
-    const sb = buildSandbox({ name: "n", sessionId: "s", templateName: "default", template: {}, config }) as any;
+    const sb = buildSandbox({ name: "n", sessionId: "s", templateName: "default", template: { warmPool: { enabled: false, size: 1, idleTimeoutSeconds: 900 } }, config }) as any;
     const c = sb.spec.podTemplate.spec.containers[0];
     expect(c.envFrom[0].secretRef.name).toBe("paseo-agent-credentials");
     expect(c.env).toBeUndefined();
