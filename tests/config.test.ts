@@ -1,8 +1,5 @@
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { ConfigSchema, loadConfig, resolveTemplate, resolveTemplateName } from "../server/config.js";
+import { ConfigSchema, resolveTemplate, resolveTemplateName } from "../server/config.js";
 
 describe("config", () => {
   it("defaults to the paseo-agents namespace", () => {
@@ -18,32 +15,26 @@ describe("config", () => {
   it("rejects unknown templates and lists the known ones", () => {
     const config = ConfigSchema.parse({ templates: { go: { image: "x" } } });
     expect(resolveTemplate(config, "go").image).toBe("x");
-    expect(resolveTemplate(config, "default")).toEqual({});
+    expect(resolveTemplate(config, "default").image).toBeUndefined();
     expect(() => resolveTemplate(config, "rust")).toThrow(/Known templates: default, go/);
   });
 });
 
-describe("loadConfig", () => {
-  const dir = mkdtempSync(join(tmpdir(), "kube-agents-"));
-
-  it("returns defaults when the file is missing", () => {
-    expect(loadConfig(join(dir, "missing.json")).namespace).toBe("paseo-agents");
+describe("settings schema", () => {
+  it("parses an empty document into a complete config", () => {
+    const c = ConfigSchema.parse({});
+    expect(c.templates).toEqual({});
+    expect(c.credentialsSecret).toBe("paseo-agent-credentials");
   });
 
-  it("parses a config file with named templates", () => {
-    const path = join(dir, "c.json");
-    writeFileSync(path, JSON.stringify({ context: "ctx", templates: { go: { image: "go:1" } } }));
-    const config = loadConfig(path);
-    expect(config.context).toBe("ctx");
-    expect(config.templates.go?.image).toBe("go:1");
-    expect(config.agentCommand).toEqual(["claude-agent-acp"]);
+  it("defaults warm pools to off and small", () => {
+    const c = ConfigSchema.parse({ templates: { go: { image: "go:1" } } });
+    expect(c.templates.go?.warmPool).toEqual({ enabled: false, size: 1, idleTimeoutSeconds: 900 });
+    expect(resolveTemplate(c, "default").warmPool.enabled).toBe(false);
   });
 
-  it("rejects invalid files instead of silently using defaults", () => {
-    const path = join(dir, "bad.json");
-    writeFileSync(path, JSON.stringify({ namespace: 5 }));
-    expect(() => loadConfig(path)).toThrow();
-    writeFileSync(path, "{not json");
-    expect(() => loadConfig(path)).toThrow();
+  it("rejects out-of-range warm pool values", () => {
+    expect(() => ConfigSchema.parse({ templates: { go: { warmPool: { size: 99 } } } })).toThrow();
+    expect(() => ConfigSchema.parse({ templates: { go: { warmPool: { idleTimeoutSeconds: 5 } } } })).toThrow();
   });
 });

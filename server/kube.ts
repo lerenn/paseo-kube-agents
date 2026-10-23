@@ -15,6 +15,8 @@ export interface Kube {
   /** Long-lived stdio JSON-RPC (ndjson) stream to a process inside the pod. */
   execStream(pod: string, argv: string[]): AcpStream;
   delete(kind: string, name: string): Promise<void>;
+  /** Applies a JSON Patch to a Secret. The patch travels on stdin, never on argv. */
+  patchSecret(name: string, jsonPatch: string): Promise<void>;
 }
 
 export interface KubectlOptions {
@@ -113,6 +115,10 @@ export class Kubectl implements Kube {
       stdio: ["pipe", "pipe", "inherit"],
     });
     return ndjsonStream(child);
+  }
+
+  async patchSecret(name: string, jsonPatch: string): Promise<void> {
+    await this.ok(["patch", "secret", name, "--type=json", "--patch-file=/dev/stdin"], jsonPatch);
   }
 
   async delete(kind: string, name: string): Promise<void> {

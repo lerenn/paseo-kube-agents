@@ -35,6 +35,12 @@ export class FakeKube implements Kube {
       writable: new WritableStream<AcpStreamMessage>(),
     };
   }
+  patches: { name: string; patch: string }[] = [];
+  patchError?: Error;
+  async patchSecret(name: string, patch: string) {
+    if (this.patchError) throw this.patchError;
+    this.patches.push({ name, patch });
+  }
   async delete(kind: string, name: string) {
     this.calls.push(`delete:${kind}/${name}`);
   }

@@ -36,29 +36,24 @@ Paseo daemon                                   cluster (paseo-agents)
   `lifecycle.shutdownTime` (default 8h) as a backstop for leaked pods.
 - **Cleanup**: `session.close`, connection close, a failed start, and the shutdown backstop all delete the Sandbox.
 
-## Templates
+## Settings UI
 
-One fat default image (`image/Dockerfile`: claude, codex, git, gh, node, python, build tools) plus optional named
-templates in `~/.paseo/kube-agents.json` (path override: env `PASEO_KUBE_CONFIG`):
+A sidebar item "Kube agents" opens a screen (host-scoped plugin settings) with: namespace, kubectl context,
+default image, the templates (default plus named ones) with an image and a warm pool each
+(on/off, size, idle timeout), and write-only credential fields. Sidebar position is controlled by the host
+(Settings > Sidebar lets the user reorder).
 
-```json
-{
-  "context": "anyshift-personal-lab",
-  "namespace": "paseo-agents",
-  "defaultImage": "ghcr.io/lerenn/paseo-kube-agents-default:latest",
-  "agentCommand": ["claude-agent-acp"],
-  "templates": {
-    "default": { "nodeSelector": { "karpenter.sh/nodepool": "burst" } },
-    "go": { "image": "ghcr.io/lerenn/paseo-kube-agents-go:latest", "resources": { "requests": { "cpu": "2", "memory": "4Gi" } } }
-  }
-}
-```
-
-The only per-agent setting is env `PASEO_KUBE_TEMPLATE` (session env, then daemon env, else `default`).
-An unknown name fails the session start and lists the known templates.
-
-PoC choice: pods are rendered as `Sandbox` directly. Mapping a template to a `SandboxTemplate` +
-`SandboxWarmPool` (claims, near-instant start) is the follow-up; in `v1beta1` a `SandboxClaim` references a warm pool.
+- **Templates**: one fat default image (`image/Dockerfile`: claude, codex, git, gh, node, python, build tools) plus
+  optional named templates. The only per-agent setting is env `PASEO_KUBE_TEMPLATE` (session env, then daemon env,
+  else `default`). An unknown name fails the session start and lists the known templates.
+- **Warm pools**: stored per template (off by default, size 1, idle timeout 900s) but not acted on yet; the
+  `SandboxClaim`/`SandboxWarmPool` path comes after the end-to-end run. Pods are rendered as `Sandbox` directly for now.
+- **Credentials**: password fields for `GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+  Values are write-only: the plugin JSON-patches them into the Secret `paseo-agent-credentials` (value sent on stdin,
+  not argv) and keeps only a local set / not set flag in `~/.paseo/kube-agents-credentials.json` (mode 0600).
+  The daemon has no `get` on the Secret, so the flag reflects what this plugin wrote.
+- **Inert until selected**: registering the provider makes no cluster call; pods are created only when an agent is
+  created with provider `kube-agents`.
 
 ## Cluster requirements
 
