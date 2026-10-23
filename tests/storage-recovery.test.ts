@@ -137,6 +137,26 @@ describe("pod loss recovery", () => {
     expect(titles.at(-1)).toBe("Reconnected on a new pod");
   });
 
+  it("reopens the session on the replacement pod without the tool policy, which the agent cannot take", async () => {
+    const kube = new FakeKube();
+    const acp = new FakeAcp();
+    let t = 0;
+    const conn = await connectKube(
+      { versions: [1], capabilities: ["prompt.message", "permission.tool_policy"] },
+      { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: () => (t += 1000) },
+    );
+    await conn.send({
+      type: "session.open", requestId: "r", sessionId: "s1",
+      config: { ...cfg(), toolPolicy: { preapproved: [{ kind: "mcp", server: "x", tool: "y" }] } },
+      history: "skip",
+    });
+    acp.emit({ type: "session.runtime_failed", sessionId: "s1", error: { message: "x" } });
+    await flush();
+    const opens = acp.inputs.filter((i) => i.type === "session.open") as any[];
+    expect(opens).toHaveLength(2);
+    expect(opens.map((o) => o.config.toolPolicy)).toEqual([undefined, undefined]);
+  });
+
   it("fails the turn that was running when the pod was lost", async () => {
     const { acp, events, kube } = await opened();
     acp.emit({ type: "session.turn", sessionId: "s1", turnId: "t9", state: "started" });

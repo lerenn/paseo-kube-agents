@@ -46,8 +46,9 @@ interface PodSession {
   sandbox: string;
   localCwd: string;
   podCwd: string;
-  /** The config Paseo opened the session with, to reopen it on a replacement pod. */
+  /** The session config to reopen on a replacement pod: the daemon-side tool policy is never sent on. */
   config: SessionConfig;
+  toolPolicy?: ProviderToolPolicy;
   inner: ProviderConnection;
   stopForwarding: () => void;
   /** The agent's own session handle, so a replacement pod can resume the conversation. */
@@ -153,7 +154,7 @@ export async function connectKube(
     // answered here instead of prompting inside the pod. Everything else reaches Paseo as usual.
     if (event.type === "session.permission" && event.sessionId === sessionId) {
       const actionId = allowActionId(event.request);
-      if (actionId && isPreapproved(ps.config.toolPolicy, [event.request.name, event.request.title])) {
+      if (actionId && isPreapproved(ps.toolPolicy, [event.request.name, event.request.title])) {
         void inner
           .send({
             type: "session.permission",
@@ -236,7 +237,8 @@ export async function connectKube(
       sandbox: name,
       localCwd: session.cwd,
       podCwd,
-      config: { ...session, cwd: podCwd },
+      config: { ...forwarded, cwd: podCwd },
+      toolPolicy: session.toolPolicy,
       inner: undefined as unknown as ProviderConnection,
       stopForwarding: () => undefined,
       opened: false,
