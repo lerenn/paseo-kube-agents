@@ -44,9 +44,9 @@ export function podSettingsValue(value: unknown): string {
   return typeof value === "string" && value ? value : "default";
 }
 
-/** GitHub token plus a Claude credential: without both, a pod agent cannot clone or run. */
+/** GitHub token plus the Claude OAuth token: without both, a pod agent cannot clone or run. */
 export function credentialsReady(set: Record<string, boolean>): boolean {
-  return set.GH_TOKEN === true && (set.CLAUDE_CODE_OAUTH_TOKEN === true || set.ANTHROPIC_API_KEY === true);
+  return set.GH_TOKEN === true && set.CLAUDE_CODE_OAUTH_TOKEN === true;
 }
 
 function TemplateSelect(props: { value: unknown; onChange(value: unknown): void; disabled: boolean }) {
@@ -100,7 +100,7 @@ export function contributePodLocation(client: PluginClientContext): () => void {
     async createWorkspace({ project, settings, idempotencyKey, prompt }) {
       const status = await client.rpc(credentialsStatus, {});
       if (!credentialsReady(status.set)) {
-        throw new Error("Set GH_TOKEN and a Claude credential in the Kube Agents screen first.");
+        throw new Error("Set GH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN in the Kube Agents screen first.");
       }
       const workspace = await client.paseo.workspaces.create({
         source: { kind: "directory", path: project.directory, projectId: project.id },

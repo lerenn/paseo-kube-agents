@@ -31,7 +31,7 @@ Paseo daemon                                   cluster (paseo-agents)
   `git clone --branch <b>`. The agent sees committed and pushed state only; local uncommitted changes
   do not travel. Paseo is told the session cwd is still the daemon-local path.
 - **Credentials**: never in images or manifests. Pods mount the Secret `paseo-agent-credentials` with
-  `envFrom` (`GH_TOKEN`, `ANTHROPIC_API_KEY`, ...). Clones use `GH_TOKEN` via a git credential helper
+  `envFrom` (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`). Clones use `GH_TOKEN` via a git credential helper
   (ssh remotes are rewritten to https). Pods have no ServiceAccount token, run non-root, and have a hard
   `lifecycle.shutdownTime` (default 8h) as a backstop for leaked pods.
 - **Cleanup**: `session.close`, connection close, a failed start, and the shutdown backstop all delete the Sandbox.
@@ -48,7 +48,7 @@ credential fields. Sidebar position is controlled by the host (Settings > Sideba
   else `default`). An unknown name fails the session start and lists the known templates.
 - **Warm pools**: stored per template (off by default, size 1, idle timeout 900s) but hidden in the UI and not acted on yet; the
   `SandboxClaim`/`SandboxWarmPool` path comes after the end-to-end run. Pods are rendered as `Sandbox` directly for now.
-- **Credentials**: password fields for `GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+- **Credentials**: password fields for `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`.
   Values are write-only: the plugin server-side-applies them into the Secret `paseo-agent-credentials` (value sent on stdin,
   not argv) and keeps only a local set / not set flag in `~/.paseo/kube-agents-credentials.json` (mode 0600).
   The daemon has no `get` on the Secret, so the flag reflects what this plugin wrote.

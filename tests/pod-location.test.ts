@@ -36,7 +36,7 @@ function fakeClient(set: Record<string, boolean>, withApi = true) {
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
-const ready = { GH_TOKEN: true, CLAUDE_CODE_OAUTH_TOKEN: true, ANTHROPIC_API_KEY: false, OPENAI_API_KEY: false };
+const ready = { GH_TOKEN: true, CLAUDE_CODE_OAUTH_TOKEN: true };
 
 describe("pod workspace location", () => {
   it("is a no-op, without crashing, on a Paseo without addWorkspaceLocation", () => {
@@ -92,7 +92,8 @@ describe("pod workspace location", () => {
   it("normalizes the settings value and credential readiness", () => {
     expect(podSettingsValue(undefined)).toBe("default");
     expect(podSettingsValue("go")).toBe("go");
-    expect(credentialsReady({ GH_TOKEN: true, ANTHROPIC_API_KEY: true })).toBe(true);
-    expect(credentialsReady({ ANTHROPIC_API_KEY: true })).toBe(false);
+    expect(credentialsReady({ GH_TOKEN: true, CLAUDE_CODE_OAUTH_TOKEN: true })).toBe(true);
+    expect(credentialsReady({ GH_TOKEN: true })).toBe(false);
+    expect(credentialsReady({ CLAUDE_CODE_OAUTH_TOKEN: true })).toBe(false);
   });
 });

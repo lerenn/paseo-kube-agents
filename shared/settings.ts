@@ -35,7 +35,7 @@ export const ConfigSchema = z.object({
   defaultImage: z.string().default(DEFAULT_IMAGE),
   /** Command that runs an ACP agent over stdio inside the pod. */
   agentCommand: z.array(z.string()).min(1).default(["claude-agent-acp"]),
-  /** Secret (keys become env vars: GH_TOKEN, ANTHROPIC_API_KEY, ...) mounted by envFrom. */
+  /** Secret (keys become env vars: GH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN) mounted by envFrom. */
   credentialsSecret: z.string().default("paseo-agent-credentials"),
   readyTimeoutSeconds: z.number().int().positive().default(300),
   /** Hard cap on pod lifetime, in seconds, enforced by the Sandbox controller. */
