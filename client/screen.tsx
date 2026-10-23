@@ -1,7 +1,9 @@
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import {
+  ExternalLink,
   Icon,
+  copyText,
   SettingsAction,
   SettingsCard,
   SettingsInput,
@@ -28,6 +30,25 @@ export const parseSelector = (text: string): Record<string, string> =>
       .filter((kv): kv is [string, string] => kv.length === 2 && kv[0] !== "" && kv[1] !== ""),
   );
 
+const CREDENTIAL_HINTS: Record<CredentialKey, { text: string; link?: { href: string; label: string }; command?: string }> = {
+  GH_TOKEN: {
+    text: "Fine-grained token on the repos agents work on. Permissions: Contents read/write, Pull requests read/write, Metadata read.",
+    link: { href: "https://github.com/settings/personal-access-tokens/new", label: "Create a token" },
+  },
+  CLAUDE_CODE_OAUTH_TOKEN: {
+    text: "Run this on your machine and paste the token:",
+    command: "claude setup-token",
+  },
+  ANTHROPIC_API_KEY: {
+    text: "Alternative to the OAuth token.",
+    link: { href: "https://console.anthropic.com/settings/keys", label: "Create a key" },
+  },
+  OPENAI_API_KEY: {
+    text: "Only needed for Codex agents.",
+    link: { href: "https://platform.openai.com/api-keys", label: "Create a key" },
+  },
+};
+
 const intOr = (text: string, fallback: number) => {
   const n = Number.parseInt(text, 10);
   return Number.isFinite(n) ? n : fallback;
@@ -41,9 +62,33 @@ function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenP
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [statusError, setStatusError] = useState<string | null>(null);
   useEffect(() => {
-    void status({}).then((r) => setIsSet(r.set[name] === true), () => setIsSet(null));
-  }, [status, name]);
+    // The plugin can be restarting (update, daemon restart); retry instead of staying unknown.
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = (attempt: number) => {
+      status({}).then(
+        (r) => {
+          if (cancelled) return;
+          setIsSet(r.set[name] === true);
+          setStatusError(null);
+        },
+        (e: Error) => {
+          if (cancelled) return;
+          setIsSet(null);
+          setStatusError(e.message);
+          timer = setTimeout(() => load(attempt + 1), Math.min(30_000, 2_000 * 2 ** attempt));
+        },
+      );
+    };
+    load(0);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name]);
 
   const save = useCallback(async () => {
     setBusy(true);
@@ -66,12 +111,32 @@ function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenP
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <View accessible accessibilityLabel={stateLabel}>
           <Icon
-            name={isSet ? "CircleCheck" : "Circle"}
+            name={isSet === null ? "CircleHelp" : isSet ? "CircleCheck" : "Circle"}
             size={16}
             color={isSet ? colors.statusSuccess : colors.foregroundMuted}
           />
         </View>
         <Text style={{ color: colors.foreground, flex: 1 }}>{CREDENTIAL_LABELS[name]}</Text>
+      </View>
+      <View style={{ gap: 4 }}>
+        <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{CREDENTIAL_HINTS[name].text}</Text>
+        {CREDENTIAL_HINTS[name].command ? (
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+            <Text selectable style={{ color: colors.foreground, fontFamily: "monospace" }}>
+              {CREDENTIAL_HINTS[name].command}
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Copy ${CREDENTIAL_HINTS[name].command}`}
+              onPress={() => void copyText(CREDENTIAL_HINTS[name].command!).catch(() => undefined)}
+            >
+              <Icon name="Copy" size={14} color={colors.foregroundMuted} />
+            </Pressable>
+          </View>
+        ) : null}
+        {CREDENTIAL_HINTS[name].link ? (
+          <ExternalLink href={CREDENTIAL_HINTS[name].link!.href}>{CREDENTIAL_HINTS[name].link!.label}</ExternalLink>
+        ) : null}
       </View>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <TextInput
@@ -107,6 +172,7 @@ function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenP
         ) : null}
       </View>
       {error ? <Text style={{ color: colors.statusDanger }}>{error}</Text> : null}
+      {statusError ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>Status unavailable, retrying: {statusError}</Text> : null}
     </View>
   );
 }
