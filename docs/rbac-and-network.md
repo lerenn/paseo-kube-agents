@@ -30,15 +30,22 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]                                                  # debugging only
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["paseo-agent-credentials"]
+    verbs: ["patch", "update"]                                      # write-only credentials from the plugin UI
 ```
 
-No `secrets` access for the daemon: the credentials Secret is only referenced by the pod
-(`envFrom`) and read by the kubelet. No ClusterRole needed. Future (not in the PoC):
+The daemon never gets `get`/`list`/`watch`/`create` on secrets, so it cannot read credentials back; the pod
+reads the Secret through `envFrom` via the kubelet. The plugin sets a key with a JSON patch
+(`kubectl patch secret paseo-agent-credentials --type=json -p '[{"op":"add","path":"/data/GH_TOKEN","value":"<base64>"}]'`),
+which needs the Secret to exist with a non-null `data` map, so the lab creates a placeholder (`data: {}`).
+Because values can't be read, the UI's "set / not set" comes from plugin-local state, not the cluster. No ClusterRole needed. Future (not in the PoC):
 `sandboxclaims`/`sandboxwarmpools` + `sandboxtemplates` (extensions.agents.x-k8s.io) get/list/create/delete.
 
 ## 4. Credentials Secret
 
-`paseo-agent-credentials` in the namespace, created by the lab (not in git, not in images). Keys become
+`paseo-agent-credentials` in the namespace, created as an empty placeholder by the lab (not in git, not in images); values are written from the plugin UI. Keys become
 env vars in every agent pod:
 
 | key | use |
