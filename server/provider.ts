@@ -15,7 +15,7 @@ const execFileAsync = promisify(execFile);
 export function createProvider(getConfig: () => Promise<KubeAgentsConfig>): ProviderRegistration {
   return {
     id: "kube-agents",
-    label: "Kube agents",
+    label: "Kube Agents",
     description: "Runs each agent in its own Kubernetes pod (agent-sandbox).",
     async status() {
       try {
@@ -34,7 +34,7 @@ export function createProvider(getConfig: () => Promise<KubeAgentsConfig>): Prov
         acpProvider: (connector) =>
           runAcpProvider({
             id: "kube-agents",
-            label: "Kube agents",
+            label: "Kube Agents",
             connector,
             acpOptions: { startupTimeoutMs: 180_000 },
           }),

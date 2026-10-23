@@ -14,8 +14,8 @@ function KubeAgentsItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
 
 export default function contribute(client: PluginClientContext) {
   const removers = [
-    client.addScreen({ id: "settings", title: "Kube agents", Component: KubeAgentsScreen }),
-    client.addSidebarHeaderItem({ id: "kube-agents", title: "Kube agents", Component: KubeAgentsItem }),
+    client.addScreen({ id: "settings", title: "Kube Agents", Component: KubeAgentsScreen }),
+    client.addSidebarHeaderItem({ id: "kube-agents", title: "Kube Agents", Component: KubeAgentsItem }),
   ];
   return () => removers.forEach((remove) => remove());
 }
