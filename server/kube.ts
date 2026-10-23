@@ -46,15 +46,24 @@ export function ndjsonStream(
   child: Pick<ReturnType<typeof spawn>, "stdin" | "stdout" | "kill">,
 ): AcpStream {
   let buffer = "";
+  // The consumer cancelling the reader kills the child, whose stdout then ends: closing or
+  // enqueuing after that throws, and an uncaught throw here takes down the whole plugin process.
+  let done = false;
   const readable = new ReadableStream<AcpStreamMessage>({
     start(controller) {
+      const finish = (error?: Error) => {
+        if (done) return;
+        done = true;
+        if (error) controller.error(error);
+        else controller.close();
+      };
       child.stdout!.on("data", (chunk: Buffer) => {
         buffer += chunk.toString("utf8");
         let newline: number;
         while ((newline = buffer.indexOf("\n")) >= 0) {
           const line = buffer.slice(0, newline).trim();
           buffer = buffer.slice(newline + 1);
-          if (!line) continue;
+          if (!line || done) continue;
           try {
             controller.enqueue(JSON.parse(line) as AcpStreamMessage);
           } catch {
@@ -62,10 +71,11 @@ export function ndjsonStream(
           }
         }
       });
-      child.stdout!.on("end", () => controller.close());
-      child.stdout!.on("error", (e) => controller.error(e));
+      child.stdout!.on("end", () => finish());
+      child.stdout!.on("error", (e) => finish(e));
     },
     cancel() {
+      done = true;
       child.kill();
     },
   });
