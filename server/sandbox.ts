@@ -5,9 +5,13 @@ export const MANAGED_BY_LABEL = "app.kubernetes.io/managed-by";
 export const MANAGED_BY = "paseo-kube-agents";
 export const WORKSPACE_ROOT = "/workspace";
 
-export function sandboxName(sessionId: string): string {
-  const slug = sessionId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
-  return `pka-${slug || "session"}-${randomBytes(3).toString("hex")}`;
+const slugify = (text: string, max: number) =>
+  text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
+
+/** `pka-<repo>-<slug>-<rand>`, like a worktree named from the repository and a slug; DNS-safe, at most 63 chars. */
+export function sandboxName(sessionId: string, repo?: string, slug?: string): string {
+  const named = [repo && slugify(repo, 18), slug && slugify(slug, 20)].filter(Boolean).join("-");
+  return `pka-${named || slugify(sessionId, 24) || "session"}-${randomBytes(3).toString("hex")}`;
 }
 
 export interface SandboxSpecInput {
