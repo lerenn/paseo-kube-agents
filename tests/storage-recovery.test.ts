@@ -143,7 +143,7 @@ describe("pod loss recovery", () => {
     let t = 0;
     const conn = await connectKube(
       { versions: [1], capabilities: ["prompt.message", "permission.tool_policy"] },
-      { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: () => (t += 1000) },
+      { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, sleep: async () => undefined, now: () => (t += 1000) },
     );
     await conn.send({
       type: "session.open", requestId: "r", sessionId: "s1",
