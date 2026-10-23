@@ -25,6 +25,7 @@ const SUPPORTED_CAPABILITIES = [
   "session.configure",
   "permission",
   "permission.tool_policy",
+  "prompt.image",
 ];
 
 export interface ConnectionDeps {
@@ -85,7 +86,7 @@ export async function connectKube(
         versions: request.versions,
         capabilities: request.capabilities,
       });
-      const stopForwarding = inner.onEvent((event) => emit(toLocal(event, sessionId, podCwd, session.cwd)));
+      const stopForwarding = inner.onEvent((event) => emit(toLocal(event, sessionId, podCwd, session.cwd, capabilities)));
       sessions.set(sessionId, { sandbox: name, localCwd: session.cwd, podCwd, inner, stopForwarding });
       const { toolPolicy: _unenforceable, ...forwarded } = session;
       await inner.send({ ...input, config: { ...forwarded, cwd: podCwd } });
@@ -169,10 +170,23 @@ export async function connectKube(
   };
 }
 
-/** Pod paths never leak to Paseo: it only knows the daemon-local checkout. */
-function toLocal(event: ProviderEvent, sessionId: string, podCwd: string, localCwd: string): ProviderEvent {
+/**
+ * Pod paths never leak to Paseo: it only knows the daemon-local checkout. A session may only report
+ * capabilities the connection advertised, so the agent's own list is clipped to those.
+ */
+function toLocal(
+  event: ProviderEvent,
+  sessionId: string,
+  podCwd: string,
+  localCwd: string,
+  advertised: readonly string[],
+): ProviderEvent {
   if (event.type === "session.opened" && event.sessionId === sessionId) {
-    return { ...event, cwd: event.cwd === podCwd ? localCwd : event.cwd };
+    return {
+      ...event,
+      cwd: event.cwd === podCwd ? localCwd : event.cwd,
+      capabilities: event.capabilities.filter((c) => advertised.includes(c)),
+    };
   }
   return event;
 }
