@@ -83,48 +83,30 @@ const intOr = (text: string, fallback: number) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenProps["theme"] }) {
-  const status = useRpc(credentialsStatus);
+function Credential({
+  name,
+  theme,
+  isSet,
+  statusError,
+  onSaved,
+}: {
+  name: CredentialKey;
+  theme: PluginScreenProps["theme"];
+  isSet: boolean | null;
+  statusError: string | null;
+  onSaved(set: Record<string, boolean>): void;
+}) {
   const setCredential = useRpc(credentialsSet);
-  const [isSet, setIsSet] = useState<boolean | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const [statusError, setStatusError] = useState<string | null>(null);
-  useEffect(() => {
-    // The plugin can be restarting (update, daemon restart); retry instead of staying unknown.
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const load = (attempt: number) => {
-      status({}).then(
-        (r) => {
-          if (cancelled) return;
-          setIsSet(r.set[name] === true);
-          setStatusError(null);
-        },
-        (e: Error) => {
-          if (cancelled) return;
-          setIsSet(null);
-          setStatusError(e.message);
-          timer = setTimeout(() => load(attempt + 1), Math.min(30_000, 2_000 * 2 ** attempt));
-        },
-      );
-    };
-    load(0);
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name]);
 
   const save = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
       const result = await setCredential({ key: name, value: draft });
-      setIsSet(result.set[name] === true);
+      onSaved(result.set);
       setDraft("");
     } catch (e) {
       setError((e as Error).message);
@@ -203,6 +185,75 @@ function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenP
       {error ? <Text style={{ color: colors.statusDanger, paddingLeft: 24 }}>{error}</Text> : null}
       {statusError ? <Text style={{ color: colors.foregroundMuted, fontSize: 12, paddingLeft: 24 }}>Status unavailable, retrying: {statusError}</Text> : null}
     </View>
+  );
+}
+
+function CredentialsSection({ theme }: { theme: PluginScreenProps["theme"] }) {
+  const status = useRpc(credentialsStatus);
+  const [open, setOpen] = useState(false);
+  const [set, setSet] = useState<Record<string, boolean> | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+
+  useEffect(() => {
+    // The plugin can be restarting (update, daemon restart); retry instead of staying unknown.
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const load = (attempt: number) => {
+      status({}).then(
+        (r) => {
+          if (cancelled) return;
+          setSet(r.set);
+          setStatusError(null);
+        },
+        (e: Error) => {
+          if (cancelled) return;
+          setStatusError(e.message);
+          timer = setTimeout(() => load(attempt + 1), Math.min(30_000, 2_000 * 2 ** attempt));
+        },
+      );
+    };
+    load(0);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const { colors } = theme;
+  const total = CREDENTIAL_KEYS.length;
+  const count = set ? CREDENTIAL_KEYS.filter((k) => set[k] === true).length : null;
+  const missing = count !== null && count < total;
+  const summary = count === null ? "status unavailable" : missing ? `${count}/${total} set, ${total - count} missing` : `${count}/${total} set`;
+  return (
+    <>
+      <SettingsCard>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: open }}
+          accessibilityLabel={`Credentials, ${summary}`}
+          onPress={() => setOpen(!open)}
+          style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 14, paddingVertical: 12 }}
+        >
+          <Text style={{ color: colors.foregroundMuted, width: 12 }}>{open ? "▾" : "▸"}</Text>
+          <Text style={{ color: missing ? colors.statusWarning : colors.foreground, flex: 1 }}>
+            {missing ? "⚠ " : ""}Credentials · {summary}
+          </Text>
+        </Pressable>
+        {open
+          ? CREDENTIAL_KEYS.map((key) => (
+              <Credential
+                key={key}
+                name={key}
+                theme={theme}
+                isSet={set ? set[key] === true : null}
+                statusError={statusError}
+                onSaved={setSet}
+              />
+            ))
+          : null}
+      </SettingsCard>
+    </>
   );
 }
 
@@ -338,13 +389,7 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
         </SettingsCard>
       </SettingsSection>
 
-      <SettingsSection title="Credentials">
-        <SettingsCard>
-          {CREDENTIAL_KEYS.map((key) => (
-            <Credential key={key} name={key} theme={theme} />
-          ))}
-        </SettingsCard>
-      </SettingsSection>
+      <CredentialsSection theme={theme} />
 
       <SettingsCard>
         <SettingsAction
