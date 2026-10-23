@@ -18,4 +18,21 @@ describe("ndjsonStream", () => {
     await w.write({ jsonrpc: "2.0", method: "x" });
     expect(stdin.read().toString()).toBe('{"jsonrpc":"2.0","method":"x"}\n');
   });
+
+  it("does not throw when stdout ends after the reader was cancelled", async () => {
+    const stdout = new PassThrough();
+    const stdin = new PassThrough();
+    let killed = false;
+    const stream = ndjsonStream({ stdin, stdout, kill: () => (killed = true) } as any);
+    await stream.readable.cancel();
+    expect(killed).toBe(true);
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    stdout.write('{"jsonrpc":"2.0","method":"late"}\n');
+    stdout.end();
+    await new Promise((r) => setTimeout(r, 20));
+    process.off("uncaughtException", onUncaught);
+    expect(uncaught).toEqual([]);
+  });
 });
