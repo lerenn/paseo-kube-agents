@@ -38,7 +38,7 @@ Paseo daemon                                   cluster (paseo-agents)
 
 ## Settings UI
 
-A sidebar item "Kube agents" opens a screen (host-scoped plugin settings) with: namespace and default image
+A sidebar item "Kube Agents" opens a screen (host-scoped plugin settings) with: namespace and default image
 (Cluster), an Advanced section (kubectl context, node selector, tolerated taint keys, agent command), a compact
 template list (default plus named ones; expand a row to edit its image, "Add template" adds one), and write-only
 credential fields. Sidebar position is controlled by the host (Settings > Sidebar lets the user reorder).
