@@ -35,10 +35,9 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
       annotations: { "paseo.sh/session-id": sessionId },
     },
     spec: {
-      lifecycle: {
-        shutdownTime: new Date(Date.now() + config.maxLifetimeSeconds * 1000).toISOString(),
-        shutdownPolicy: "Delete",
-      },
+      shutdownTime: new Date(Date.now() + config.maxLifetimeSeconds * 1000).toISOString(),
+      shutdownPolicy: "Delete",
+      service: false,
       podTemplate: {
         metadata: { labels },
         spec: {
