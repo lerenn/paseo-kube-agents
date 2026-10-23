@@ -1,15 +1,15 @@
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
 import {
+  Icon,
   SettingsAction,
   SettingsCard,
   SettingsInput,
-  SettingsRow,
   SettingsSection,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useState } from "react";
-import { ScrollView, Text, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { CREDENTIAL_KEYS, type CredentialKey, credentialsSet, credentialsStatus } from "../shared/credentials.js";
 import { type KubeAgentsConfig, kubeSettings } from "../shared/settings.js";
 
@@ -33,7 +33,7 @@ const intOr = (text: string, fallback: number) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-function Credential({ name }: { name: CredentialKey }) {
+function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenProps["theme"] }) {
   const status = useRpc(credentialsStatus);
   const setCredential = useRpc(credentialsSet);
   const [isSet, setIsSet] = useState<boolean | null>(null);
@@ -59,20 +59,55 @@ function Credential({ name }: { name: CredentialKey }) {
     }
   }, [setCredential, name, draft]);
 
-  const state = isSet === null ? "unknown" : isSet ? "set" : "not set";
+  const stateLabel = isSet === null ? "unknown" : isSet ? "set" : "not set";
+  const { colors } = theme;
   return (
-    <>
-      <SettingsRow label={CREDENTIAL_LABELS[name]} hint={`${state}. Write-only.`} error={error}>
-        <SettingsInput
-          key={`${name}-${isSet}`}
-          secureTextEntry
-          placeholder={isSet ? "New value" : "Value"}
+    <View style={{ padding: 12, gap: 8 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <View accessible accessibilityLabel={stateLabel}>
+          <Icon
+            name={isSet ? "CircleCheck" : "Circle"}
+            size={16}
+            color={isSet ? colors.statusSuccess : colors.foregroundMuted}
+          />
+        </View>
+        <Text style={{ color: colors.foreground, flex: 1 }}>{CREDENTIAL_LABELS[name]}</Text>
+      </View>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <TextInput
+          value={draft}
           onChangeText={setDraft}
-          disabled={busy}
+          secureTextEntry
+          autoCapitalize="none"
+          autoCorrect={false}
+          editable={!busy}
+          placeholder={isSet ? "New value" : "Value"}
+          placeholderTextColor={colors.foregroundMuted}
+          accessibilityLabel={`${CREDENTIAL_LABELS[name]} value`}
+          style={{
+            flex: 1,
+            color: colors.foreground,
+            borderColor: colors.border,
+            borderWidth: 1,
+            borderRadius: 8,
+            paddingHorizontal: 10,
+            paddingVertical: 6,
+          }}
         />
-      </SettingsRow>
-      <SettingsAction label="" actionLabel={busy ? "Saving..." : "Save"} onPress={() => void save()} disabled={busy || draft.length === 0} />
-    </>
+        {draft.length > 0 ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Save ${CREDENTIAL_LABELS[name]}`}
+            disabled={busy}
+            onPress={() => void save()}
+            style={{ backgroundColor: colors.accent, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 7, opacity: busy ? 0.6 : 1 }}
+          >
+            <Text style={{ color: colors.accentForeground }}>{busy ? "Saving..." : "Save"}</Text>
+          </Pressable>
+        ) : null}
+      </View>
+      {error ? <Text style={{ color: colors.statusDanger }}>{error}</Text> : null}
+    </View>
   );
 }
 
@@ -211,7 +246,7 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
       <SettingsSection title="Credentials">
         <SettingsCard>
           {CREDENTIAL_KEYS.map((key) => (
-            <Credential key={key} name={key} />
+            <Credential key={key} name={key} theme={theme} />
           ))}
         </SettingsCard>
       </SettingsSection>
