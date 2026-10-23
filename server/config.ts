@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const DEFAULT_NAMESPACE = "paseo-agent-sandboxes";
+export const DEFAULT_NAMESPACE = "paseo-agents";
 export const DEFAULT_IMAGE = "ghcr.io/lerenn/paseo-kube-agents-default:latest";
 export const TEMPLATE_ENV = "PASEO_KUBE_TEMPLATE";
 

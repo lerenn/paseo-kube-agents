@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { ConfigSchema, resolveTemplate, resolveTemplateName } from "../server/config.js";
 
 describe("config", () => {
-  it("defaults to the paseo-agent-sandboxes namespace", () => {
-    expect(ConfigSchema.parse({}).namespace).toBe("paseo-agent-sandboxes");
+  it("defaults to the paseo-agents namespace", () => {
+    expect(ConfigSchema.parse({}).namespace).toBe("paseo-agents");
   });
 
   it("reads the template from session env, then daemon env, else default", () => {

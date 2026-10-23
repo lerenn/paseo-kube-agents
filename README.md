@@ -9,7 +9,7 @@ Status: proof of concept, one agent per pod, developed against a fake cluster. N
 ## How it works
 
 ```
-Paseo daemon                                   cluster (paseo-agent-sandboxes)
+Paseo daemon                                   cluster (paseo-agents)
 ┌──────────────────────────────┐               ┌───────────────────────────────┐
 │ provider "kube-agents"       │  kubectl apply│ Sandbox pka-<session>-<rand>  │
 │  connectKube()               │──────────────▶│  └ pod (default/go/node image)│
@@ -44,7 +44,7 @@ templates in `~/.paseo/kube-agents.json` (path override: env `PASEO_KUBE_CONFIG`
 ```json
 {
   "context": "anyshift-personal-lab",
-  "namespace": "paseo-agent-sandboxes",
+  "namespace": "paseo-agents",
   "defaultImage": "ghcr.io/lerenn/paseo-kube-agents-default:latest",
   "agentCommand": ["claude-agent-acp"],
   "templates": {

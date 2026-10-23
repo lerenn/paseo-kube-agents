@@ -10,7 +10,7 @@ describe("sandbox manifest", () => {
     const sb = buildSandbox({ name: "pka-x", sessionId: "s1", templateName: "go", template: config.templates.go!, config }) as any;
     expect(sb.kind).toBe("Sandbox");
     expect(sb.apiVersion).toBe("agents.x-k8s.io/v1beta1");
-    expect(sb.metadata.namespace).toBe("paseo-agent-sandboxes");
+    expect(sb.metadata.namespace).toBe("paseo-agents");
     expect(sb.spec.podTemplate.spec.containers[0].image).toBe("go:1");
     expect(sb.spec.podTemplate.spec.nodeSelector).toEqual({ pool: "burst" });
     expect(sb.spec.lifecycle.shutdownPolicy).toBe("Delete");

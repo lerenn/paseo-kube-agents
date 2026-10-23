@@ -1,20 +1,20 @@
-# Cluster requirements (lab: `anyshift-personal-lab`, namespace `paseo-agent-sandboxes`)
+# Cluster requirements (lab: `anyshift-personal-lab`, namespace `paseo-agents`)
 
 What kube-agents needs from the cluster. Nothing here is created by the plugin.
 
 ## 1. agent-sandbox controller
 
-Install kubernetes-sigs/agent-sandbox (core `agents.x-k8s.io` CRDs; the PoC uses only `Sandbox`).
+Install kubernetes-sigs/agent-sandbox, controller named `paseo-agents-controller` (core `agents.x-k8s.io` CRDs; the PoC uses only `Sandbox`).
 The default `sandboxApiVersion` is `agents.x-k8s.io/v1beta1`; confirm with
 `kubectl get crd sandboxes.agents.x-k8s.io -o jsonpath='{.spec.versions[*].name}'`.
 
 ## 2. Namespace
 
-`paseo-agent-sandboxes`, on the Karpenter burst pool. Pods get the pool through the template's
+`paseo-agents`, on the Karpenter burst pool. Pods get the pool through the template's
 `nodeSelector`/`tolerations` in kube-agents config (the lab agent should tell us the labels/taints).
 Suggested labels: `pod-security.kubernetes.io/enforce: baseline` (pods run non-root, no SA token).
 
-## 3. RBAC for the daemon ServiceAccount (Role + RoleBinding in `paseo-agent-sandboxes`)
+## 3. RBAC for the daemon ServiceAccount (Role + RoleBinding in `paseo-agents`)
 
 ```yaml
 rules:
@@ -54,7 +54,7 @@ The Secret is `optional` in the pod spec so the pod still starts without it.
 ```yaml
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
-metadata: {name: agent-pods, namespace: paseo-agent-sandboxes}
+metadata: {name: agent-pods, namespace: paseo-agents}
 spec:
   podSelector: {matchLabels: {app.kubernetes.io/managed-by: paseo-kube-agents}}
   policyTypes: [Ingress, Egress]
