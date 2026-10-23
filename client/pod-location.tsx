@@ -2,6 +2,7 @@ import type { ComponentType } from "react";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
 import { SettingsSelect, SettingsCard } from "@getpaseo/plugin/client/ui";
 import { useSettings } from "@getpaseo/plugin/client";
+import { refEnv } from "../shared/pod-ref.js";
 import { credentialsStatus } from "../shared/credentials.js";
 import { kubeSettings, TEMPLATE_ENV } from "../shared/settings.js";
 
@@ -13,6 +14,11 @@ interface WorkspaceLocationProject {
   id: string;
   name: string;
   directory: string;
+}
+export interface WorkspaceLocationRef {
+  action: "branch-off" | "checkout";
+  refName?: string;
+  changeRequest?: { forge: string; number: number; projectPath?: string };
 }
 interface WorkspaceLocationContribution {
   id: string;
@@ -26,12 +32,16 @@ interface WorkspaceLocationContribution {
     disabled: boolean;
   }>;
   defaultValue?: unknown;
+  /** Show the branch picker (default true). */
+  usesRef?: boolean;
   createWorkspace(context: {
     hostId: string;
     project: WorkspaceLocationProject;
     settings: unknown;
     idempotencyKey: string;
     prompt: string;
+    slug: string;
+    ref: WorkspaceLocationRef | null;
   }): Promise<{ workspaceId: string; agentId?: string }>;
 }
 type WithWorkspaceLocation = PluginClientContext & {
@@ -39,6 +49,13 @@ type WithWorkspaceLocation = PluginClientContext & {
 };
 
 const REFRESH_MS = 30_000;
+
+/**
+ * The daemon requires `provider/model`. Paseo does not pass the composer's model to a workspace
+ * location, so the pod agent starts on the agent's own default and the model can be changed from
+ * the composer once the session is up.
+ */
+export const POD_AGENT_PROVIDER = "kube-agents/default";
 
 export function podSettingsValue(value: unknown): string {
   return typeof value === "string" && value ? value : "default";
@@ -92,25 +109,26 @@ export function contributePodLocation(client: PluginClientContext): () => void {
     title: "Pod",
     icon: "Container",
     defaultValue: "default",
+    usesRef: true,
     isAvailable() {
       if (Date.now() - lastRefresh > REFRESH_MS) refresh();
       return ready;
     },
     Settings: TemplateSelect,
-    async createWorkspace({ project, settings, idempotencyKey, prompt }) {
+    async createWorkspace({ project, settings, idempotencyKey, prompt, slug, ref }) {
       const status = await client.rpc(credentialsStatus, {});
       if (!credentialsReady(status.set)) {
         throw new Error("Set GH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN in the Kube Agents screen first.");
       }
       const workspace = await client.paseo.workspaces.create({
         source: { kind: "directory", path: project.directory, projectId: project.id },
-        title: `${project.name} (pod)`,
+        title: `${project.name}-${slug}`,
         idempotencyKey,
       });
       const template = podSettingsValue(settings);
       const agent = await workspace.agents.create({
-        config: { provider: "kube-agents" },
-        env: template === "default" ? {} : { [TEMPLATE_ENV]: template },
+        config: { provider: POD_AGENT_PROVIDER },
+        env: { ...(template === "default" ? {} : { [TEMPLATE_ENV]: template }), ...refEnv(ref, slug) },
         prompt,
         idempotencyKey,
       });

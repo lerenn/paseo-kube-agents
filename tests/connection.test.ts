@@ -215,6 +215,14 @@ describe("kube connection edge cases", () => {
     expect(events[0]).toMatchObject({ type: "request.failed", error: { message: expect.stringContaining("Known templates") } });
   });
 
+  it("offers an agent-default model in the catalog so provider/model resolves", async () => {
+    const { events, conn: p } = setup();
+    const conn = await p;
+    conn.onEvent((e) => events.push(e));
+    await conn.send({ type: "catalog", requestId: "k" });
+    expect((events[0] as any).catalog).toMatchObject({ defaultModel: "default", models: [{ id: "default" }] });
+  });
+
   it("answers catalog and sessions requests locally", async () => {
     const { kube, events, conn: p } = setup();
     const conn = await p;

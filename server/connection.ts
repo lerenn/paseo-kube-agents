@@ -14,7 +14,8 @@ import {
 } from "./config.js";
 import type { Kube } from "./kube.js";
 import { buildSandbox, sandboxName } from "./sandbox.js";
-import { cloneIntoPod, detectRepo, podWorkdir, type RepoRef } from "./workspace.js";
+import { REF_ENV_KEYS } from "../shared/pod-ref.js";
+import { cloneIntoPod, detectRepo, parseClonePlan, podWorkdir, repoName, type RepoRef } from "./workspace.js";
 
 const PROTOCOL_VERSION = 1;
 // `permission.tool_policy` is advertised because Paseo requires it whenever a plugin sets a tool policy
@@ -91,14 +92,15 @@ export async function connectKube(
     const templateName = resolveTemplateName(session.env);
     const template = resolveTemplate(config, templateName);
     const repo = await (deps.detectRepo ?? detectRepo)(session.cwd);
-    const name = sandboxName(sessionId);
+    const plan = parseClonePlan(session.env);
+    const name = sandboxName(sessionId, repoName(repo.url), session.env[REF_ENV_KEYS.slug]);
     const podCwd = podWorkdir(name);
 
     await kube.apply(buildSandbox({ name, sessionId, templateName, template, config }));
     let inner: ProviderConnection | undefined;
     try {
       await kube.waitReady("sandbox", name, config.readyTimeoutSeconds);
-      await cloneIntoPod(kube, name, repo, podCwd);
+      await cloneIntoPod(kube, name, repo, podCwd, plan);
 
       const connector: AcpConnector = () => kube.execStream(name, [...config.agentCommand]);
       inner = await deps.acpProvider(connector).connect({
@@ -152,7 +154,15 @@ export async function connectKube(
       if (closed) throw new Error("kube-agents connection is closed");
       switch (input.type) {
         case "catalog":
-          emit({ type: "catalog", requestId: input.requestId, catalog: { models: [], modes: [] } });
+          emit({
+            type: "catalog",
+            requestId: input.requestId,
+            catalog: {
+              models: [{ id: "default", label: "Agent default", isDefault: true }],
+              modes: [],
+              defaultModel: "default",
+            },
+          });
           return;
         case "sessions":
           emit({ type: "sessions", requestId: input.requestId, sessions: [] });
