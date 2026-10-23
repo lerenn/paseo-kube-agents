@@ -23,7 +23,7 @@ describe("sandbox manifest", () => {
     const sb = buildSandbox({ name: "n", sessionId: "s", templateName: "default", template: { warmPool: { enabled: false, size: 1, idleTimeoutSeconds: 900 } }, config }) as any;
     const c = sb.spec.podTemplate.spec.containers[0];
     expect(c.envFrom[0].secretRef.name).toBe("paseo-agent-credentials");
-    expect(c.env).toBeUndefined();
+    expect(c.env).toEqual([{ name: "HOME", value: "/workspace/.home" }]); // no credential values inline
   });
 
   it("applies the global node selector and tolerations unless the template sets its own", () => {

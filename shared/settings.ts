@@ -26,6 +26,16 @@ export const TemplateSchema = z.object({
   warmPool: WarmPoolSchema.default({ enabled: false, size: 1, idleTimeoutSeconds: 900 }),
 });
 
+/** Where a pod's `/workspace` (clone, HOME and the agent's session state) lives. */
+export const StorageSchema = z.object({
+  /** `persistent` is a ReadWriteOnce PVC owned by the Sandbox; `ephemeral` is an emptyDir lost with the pod. */
+  mode: z.enum(["ephemeral", "persistent"]).default("persistent"),
+  /** A Kubernetes quantity, e.g. 10Gi. */
+  size: z.string().regex(/^[1-9][0-9]*(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$/, "Use a Kubernetes quantity such as 10Gi").default("10Gi"),
+  /** Empty (unset) uses the cluster's default StorageClass. */
+  storageClassName: z.string().optional(),
+});
+
 export const ConfigSchema = z.object({
   /** kubectl context. Unset uses the current context of the daemon's kubeconfig. */
   context: z.string().optional(),
@@ -44,6 +54,7 @@ export const ConfigSchema = z.object({
   nodeSelector: z.record(z.string(), z.string()).default({}),
   /** Taint keys every pod tolerates (operator Exists), for templates without their own tolerations. */
   tolerationKeys: z.array(z.string()).default([]),
+  storage: StorageSchema.default({ mode: "persistent", size: "10Gi" }),
   /** Named pod templates; "default" always exists. */
   templates: z.record(z.string(), TemplateSchema).default({}),
 });

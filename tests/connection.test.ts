@@ -11,12 +11,17 @@ const sessionConfig = (env: Record<string, string> = {}): ProviderSessionConfig 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 const repo = async () => ({ url: "https://github.com/lerenn/x", branch: "main" });
 
+const fakeClock = () => {
+  let t = 0;
+  return () => (t += 1000);
+};
+
 function setup(overrides: Partial<ReturnType<typeof ConfigSchema.parse>> = {}) {
   const kube = new FakeKube();
   const acp = new FakeAcp();
   const config = ConfigSchema.parse({ templates: { go: { image: "go:1" } }, ...overrides });
   const events: ProviderEvent[] = [];
-  const conn = connectKube(request, { config, kube, acpProvider: acp.provider, detectRepo: repo });
+  const conn = connectKube(request, { config, kube, acpProvider: acp.provider, detectRepo: repo, sleep: async () => undefined, now: fakeClock() });
   return { kube, acp, events, conn };
 }
 
@@ -29,9 +34,9 @@ describe("kube connection", () => {
     await conn.send({ type: "session.open", requestId: "r1", sessionId: "s1", config: sessionConfig(), history: "skip" });
     expect(kube.applied).toHaveLength(1);
     const name = (kube.applied[0] as any).metadata.name as string;
-    expect(kube.calls.slice(0, 3)).toEqual(["apply", `wait:sandbox/${name}`, "exec"]);
+    expect(kube.calls.slice(0, 4)).toEqual(["apply", `pod:${name}`, "exec", "exec"]); // apply, wait for pod, check volume, clone
     // clone happens in the pod, then the agent sees the pod path, not the daemon path
-    expect(kube.execs[0]!.argv.slice(-3)).toEqual(["main", "https://github.com/lerenn/x", `/workspace/${name}`]);
+    expect(kube.execs[1]!.argv.slice(-3)).toEqual(["main", "https://github.com/lerenn/x", `/workspace/${name}`]);
     const open = acp.inputs[0] as any;
     expect(open.config.cwd).toBe(`/workspace/${name}`);
     // Paseo sees its own cwd
@@ -49,7 +54,7 @@ describe("kube connection", () => {
 
     await conn.send({ type: "session.close", requestId: "r2", sessionId: "s1" });
     expect(acp.closed).toBe(true);
-    expect(kube.calls.at(-1)).toBe(`delete:sandbox/${name}`);
+    expect(kube.calls.slice(-2)).toEqual([`delete:sandbox/${name}`, `delete:pvc/workspace-${name}`]);
     expect(events.at(-1)).toEqual({ type: "request.completed", requestId: "r2" });
   });
 
@@ -109,7 +114,7 @@ describe("kube connection", () => {
     conn.onEvent((e) => events.push(e));
     await conn.send({ type: "session.open", requestId: "r", sessionId: "s", config: sessionConfig(), history: "skip" });
     expect(kube.calls.some((c) => c.startsWith("delete:sandbox/"))).toBe(true);
-    expect(events[0]).toMatchObject({ type: "request.failed", requestId: "r", error: { message: expect.stringContaining("timed out") } });
+    expect(events[0]).toMatchObject({ type: "request.failed", requestId: "r", error: { message: expect.stringContaining("not ready") } });
   });
 
   it("fails and cleans up when the clone fails", async () => {
@@ -119,7 +124,7 @@ describe("kube connection", () => {
     conn.onEvent((e) => events.push(e));
     await conn.send({ type: "session.open", requestId: "r", sessionId: "s", config: sessionConfig(), history: "skip" });
     expect(events[0]).toMatchObject({ type: "request.failed" });
-    expect(kube.calls.at(-1)).toMatch(/^delete:sandbox\//);
+    expect(kube.calls.some((c) => c.startsWith("delete:sandbox/"))).toBe(true);
   });
 
   it("deletes every pod when the connection closes", async () => {
@@ -129,7 +134,7 @@ describe("kube connection", () => {
       await conn.send({ type: "session.open", requestId: id, sessionId: id, config: sessionConfig(), history: "skip" });
     }
     await conn.close();
-    expect(kube.calls.filter((c) => c.startsWith("delete:"))).toHaveLength(2);
+    expect(kube.calls.filter((c) => c.startsWith("delete:sandbox/"))).toHaveLength(2);
   });
 });
 
@@ -198,12 +203,12 @@ describe("kube connection edge cases", () => {
       };
       return reg;
     };
-    const conn = await connectKube(request, { config: ConfigSchema.parse({}), kube, acpProvider: failing, detectRepo: repo });
+    const conn = await connectKube(request, { config: ConfigSchema.parse({}), kube, acpProvider: failing, detectRepo: repo, sleep: async () => undefined, now: fakeClock() });
     conn.onEvent((e) => events.push(e));
     await open(conn, "s");
     expect(events.at(-1)).toMatchObject({ type: "request.failed", error: { message: expect.stringContaining("agent crashed") } });
     expect(acp.closed).toBe(true);
-    expect(kube.calls.at(-1)).toMatch(/^delete:sandbox\//);
+    expect(kube.calls.some((c) => c.startsWith("delete:sandbox/"))).toBe(true);
   });
 
   it("fails fast on an unknown template without creating anything", async () => {

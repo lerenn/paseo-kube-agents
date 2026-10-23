@@ -28,6 +28,9 @@ rules:
     resources: ["pods/exec"]
     verbs: ["create"]                                               # clone + agent stdio
   - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "delete"]                                # workspace volume: status and cleanup on archive
+  - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]                                                  # debugging only
   - apiGroups: [""]
@@ -44,6 +47,16 @@ Server-side apply needs only `patch`; the lab creates the Secret placeholder, so
 per key keeps writes to different keys independent.
 Because values can't be read, the UI's "set / not set" comes from plugin-local state, not the cluster. No ClusterRole needed. Future (not in the PoC):
 `sandboxclaims`/`sandboxwarmpools` + `sandboxtemplates` (extensions.agents.x-k8s.io) get/list/create/delete.
+
+## 3b. Workspace storage
+
+By default each agent pod gets a plain ReadWriteOnce PersistentVolumeClaim (10Gi, the cluster's default
+StorageClass unless one is set) through the Sandbox's `volumeClaimTemplates`; nothing is cloud-specific. The
+Sandbox controller creates it as `workspace-<sandbox>` and owns it, so deleting the Sandbox (archive, or the
+shutdown time) deletes the claim and, with a `Delete` reclaim policy, its volume. The plugin also deletes the
+claim explicitly (best effort). If the replacement pod after a node loss cannot be scheduled (for example the
+volume is bound to a zone with no capacity), the session shows the scheduler's message. `ephemeral` mode
+uses an `emptyDir` and needs none of this.
 
 ## 4. Credentials Secret
 

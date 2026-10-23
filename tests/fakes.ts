@@ -5,7 +5,7 @@ import type {
   ProviderInput,
   ProviderRegistration,
 } from "@getpaseo/plugin/server/provider";
-import type { ExecResult, Kube } from "../server/kube.js";
+import type { ExecResult, Kube, PodInfo } from "../server/kube.js";
 
 export class FakeKube implements Kube {
   calls: string[] = [];
@@ -19,13 +19,20 @@ export class FakeKube implements Kube {
     this.calls.push("apply");
     this.applied.push(manifest);
   }
-  async waitReady(kind: string, name: string) {
-    this.calls.push(`wait:${kind}/${name}`);
+  /** Scripted pod states, consumed in order; the last one repeats. */
+  pods: (PodInfo | null)[] = [{ uid: "uid-1", ready: true, terminating: false }];
+  async podInfo(name: string) {
+    this.calls.push(`pod:${name}`);
     if (this.waitError) throw this.waitError;
+    return this.pods.length > 1 ? this.pods.shift()! : this.pods[0]!;
   }
+  /** True once the workspace holds a clone (survives a replaced pod when storage is persistent). */
+  hasClone = false;
   async exec(pod: string, argv: string[]) {
     this.calls.push("exec");
     this.execs.push({ pod, argv });
+    if (argv[0] === "test") return { code: this.hasClone ? 0 : 1, stdout: "", stderr: "" };
+    if (this.execResult.code === 0 && argv[0] === "sh" && argv[2]?.includes("clone")) this.hasClone = true;
     return this.execResult;
   }
   execStream(pod: string, argv: string[]) {
@@ -52,6 +59,7 @@ export class FakeAcp {
   inputs: ProviderInput[] = [];
   listeners = new Set<(e: ProviderEvent) => void>();
   closed = false;
+  closeCount = 0;
   connector?: AcpConnector;
 
   provider = (connector: AcpConnector): ProviderRegistration => {
@@ -65,7 +73,7 @@ export class FakeAcp {
         send: async (input) => {
           this.inputs.push(input);
           if (input.type === "session.open") {
-            this.emit({ type: "session.opened", sessionId: input.sessionId, capabilities: ["prompt.image", "session.persistence"], restoration: "core", cwd: input.config.cwd });
+            this.emit({ type: "session.opened", sessionId: input.sessionId, capabilities: ["prompt.image", "session.persistence"], restoration: "core", cwd: input.config.cwd, persistence: { version: 1, data: { sessionId: `native-${input.sessionId}` } } });
             this.emit({ type: "session.ready", sessionId: input.sessionId });
           }
           if (input.type === "session.prompt" && (input.prompt.input as any).content?.[0]?.text === "ask") {
@@ -97,6 +105,7 @@ export class FakeAcp {
         },
         close: async () => {
           this.closed = true;
+          this.closeCount++;
         },
       }),
     };

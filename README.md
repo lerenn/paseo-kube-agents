@@ -34,6 +34,12 @@ Paseo daemon                                   cluster (paseo-agents)
   `envFrom` (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`). Clones use `GH_TOKEN` via a git credential helper
   (ssh remotes are rewritten to https). Pods have no ServiceAccount token, run non-root, and have a hard
   `lifecycle.shutdownTime` (default 8h) as a backstop for leaked pods.
+- **Storage and restarts**: `/workspace` (the clone, plus `HOME` so the agent's session state) is a plain
+  ReadWriteOnce PVC from the Sandbox's `volumeClaimTemplates` (default 10Gi, default StorageClass; settable, or
+  `ephemeral` for an emptyDir). When the pod is lost (eviction, node loss, delete) the Sandbox controller
+  recreates it, the plugin waits for it (showing why if it cannot be scheduled), reuses the clone and reopens the
+  agent's session from its saved handle. A turn that was running is marked failed. Uncommitted work survives; an
+  ephemeral workspace loses it. Archiving deletes the Sandbox and its claim.
 - **Cleanup**: `session.close`, connection close, a failed start, and the shutdown backstop all delete the Sandbox.
 
 ## Settings UI

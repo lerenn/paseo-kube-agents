@@ -4,6 +4,11 @@ import type { KubeAgentsConfig, TemplateConfig } from "./config.js";
 export const MANAGED_BY_LABEL = "app.kubernetes.io/managed-by";
 export const MANAGED_BY = "paseo-kube-agents";
 export const WORKSPACE_ROOT = "/workspace";
+/** Claude's session state lives under HOME, so HOME is on the workspace volume to survive pod restarts. */
+export const HOME_DIR = `${WORKSPACE_ROOT}/.home`;
+export const WORKSPACE_VOLUME = "workspace";
+/** The Sandbox controller names the claim `<template name>-<sandbox name>`. */
+export const workspaceClaimName = (sandbox: string) => `${WORKSPACE_VOLUME}-${sandbox}`;
 
 const slugify = (text: string, max: number) =>
   text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
@@ -42,6 +47,7 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
       shutdownTime: new Date(Date.now() + config.maxLifetimeSeconds * 1000).toISOString(),
       shutdownPolicy: "Delete",
       service: false,
+      ...volumeClaims(config),
       podTemplate: {
         metadata: { labels },
         spec: {
@@ -53,14 +59,16 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
             {
               name: "agent",
               image: template.image ?? config.defaultImage,
-              command: ["sleep", "infinity"],
+              command: ["sh", "-c", `mkdir -p "${HOME_DIR}" && exec sleep infinity`],
               workingDir: WORKSPACE_ROOT,
+              env: [{ name: "HOME", value: HOME_DIR }],
               envFrom: [{ secretRef: { name: config.credentialsSecret, optional: true } }],
               ...(template.resources ? { resources: template.resources } : {}),
-              volumeMounts: [{ name: "workspace", mountPath: WORKSPACE_ROOT }],
+              volumeMounts: [{ name: WORKSPACE_VOLUME, mountPath: WORKSPACE_ROOT }],
             },
           ],
-          volumes: [{ name: "workspace", emptyDir: {} }],
+          // Persistent storage comes from volumeClaimTemplates; the controller adds the volume.
+          ...(config.storage.mode === "ephemeral" ? { volumes: [{ name: WORKSPACE_VOLUME, emptyDir: {} }] } : {}),
         },
       },
     },
@@ -74,5 +82,23 @@ function placement(template: TemplateConfig, config: KubeAgentsConfig) {
   return {
     ...(Object.keys(nodeSelector).length > 0 ? { nodeSelector } : {}),
     ...(tolerations.length > 0 ? { tolerations } : {}),
+  };
+}
+
+/** A plain ReadWriteOnce claim: no provider-specific fields, so it works on any cluster. */
+function volumeClaims(config: KubeAgentsConfig) {
+  if (config.storage.mode !== "persistent") return {};
+  const { size, storageClassName } = config.storage;
+  return {
+    volumeClaimTemplates: [
+      {
+        metadata: { name: WORKSPACE_VOLUME },
+        spec: {
+          accessModes: ["ReadWriteOnce"],
+          resources: { requests: { storage: size } },
+          ...(storageClassName ? { storageClassName } : {}),
+        },
+      },
+    ],
   };
 }
