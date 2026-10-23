@@ -20,6 +20,14 @@ const CREDENTIAL_LABELS: Record<CredentialKey, string> = {
   OPENAI_API_KEY: "OpenAI API key (OPENAI_API_KEY)",
 };
 
+export const parseSelector = (text: string): Record<string, string> =>
+  Object.fromEntries(
+    text
+      .split(",")
+      .map((pair) => pair.split("=").map((part) => part.trim()))
+      .filter((kv): kv is [string, string] => kv.length === 2 && kv[0] !== "" && kv[1] !== ""),
+  );
+
 const intOr = (text: string, fallback: number) => {
   const n = Number.parseInt(text, 10);
   return Number.isFinite(n) ? n : fallback;
@@ -160,6 +168,27 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
         <SettingsCard>
           <SettingsInput label="Namespace" initialValue={draft.namespace} onChangeText={(namespace) => setDraft({ ...draft, namespace: namespace.trim() })} />
           <SettingsInput label="kubectl context" hint="Empty uses the daemon's current context." initialValue={draft.context ?? ""} onChangeText={(t) => setDraft({ ...draft, context: t.trim() || undefined })} />
+          <SettingsInput
+            label="Node selector"
+            hint="label=value, comma separated. Applied to every pod without its own."
+            initialValue={Object.entries(draft.nodeSelector).map(([k, v]) => `${k}=${v}`).join(",")}
+            onChangeText={(t) => setDraft({ ...draft, nodeSelector: parseSelector(t) })}
+          />
+          <SettingsInput
+            label="Tolerated taint keys"
+            hint="Comma separated; each is tolerated with operator Exists."
+            initialValue={draft.tolerationKeys.join(",")}
+            onChangeText={(t) => setDraft({ ...draft, tolerationKeys: t.split(",").map((k) => k.trim()).filter(Boolean) })}
+          />
+          <SettingsInput
+            label="Agent command"
+            hint="Runs an ACP agent over stdio in the pod, space separated. Default: claude-agent-acp"
+            initialValue={draft.agentCommand.join(" ")}
+            onChangeText={(t) => {
+              const parts = t.split(/\s+/).filter(Boolean);
+              if (parts.length > 0) setDraft({ ...draft, agentCommand: parts });
+            }}
+          />
           <SettingsInput label="Default image" initialValue={draft.defaultImage} onChangeText={(defaultImage) => setDraft({ ...draft, defaultImage: defaultImage.trim() })} />
         </SettingsCard>
       </SettingsSection>

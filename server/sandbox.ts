@@ -45,8 +45,7 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
           restartPolicy: "Never",
           automountServiceAccountToken: false,
           securityContext: { runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000 },
-          ...(template.nodeSelector ? { nodeSelector: template.nodeSelector } : {}),
-          ...(template.tolerations ? { tolerations: template.tolerations } : {}),
+          ...placement(template, config),
           containers: [
             {
               name: "agent",
@@ -62,5 +61,15 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
         },
       },
     },
+  };
+}
+
+function placement(template: TemplateConfig, config: KubeAgentsConfig) {
+  const nodeSelector = template.nodeSelector ?? config.nodeSelector;
+  const tolerations =
+    template.tolerations ?? config.tolerationKeys.map((key) => ({ key, operator: "Exists" }));
+  return {
+    ...(Object.keys(nodeSelector).length > 0 ? { nodeSelector } : {}),
+    ...(tolerations.length > 0 ? { tolerations } : {}),
   };
 }
