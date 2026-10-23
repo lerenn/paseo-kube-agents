@@ -38,15 +38,15 @@ Paseo daemon                                   cluster (paseo-agents)
 
 ## Settings UI
 
-A sidebar item "Kube agents" opens a screen (host-scoped plugin settings) with: namespace, kubectl context,
-default image, the templates (default plus named ones) with an image and a warm pool each
-(on/off, size, idle timeout), and write-only credential fields. Sidebar position is controlled by the host
-(Settings > Sidebar lets the user reorder).
+A sidebar item "Kube agents" opens a screen (host-scoped plugin settings) with: namespace and default image
+(Cluster), an Advanced section (kubectl context, node selector, tolerated taint keys, agent command), a compact
+template list (default plus named ones; expand a row to edit its image, "Add template" adds one), and write-only
+credential fields. Sidebar position is controlled by the host (Settings > Sidebar lets the user reorder).
 
 - **Templates**: one fat default image (`image/Dockerfile`: claude, codex, git, gh, node, python, build tools) plus
   optional named templates. The only per-agent setting is env `PASEO_KUBE_TEMPLATE` (session env, then daemon env,
   else `default`). An unknown name fails the session start and lists the known templates.
-- **Warm pools**: stored per template (off by default, size 1, idle timeout 900s) but not acted on yet; the
+- **Warm pools**: stored per template (off by default, size 1, idle timeout 900s) but hidden in the UI and not acted on yet; the
   `SandboxClaim`/`SandboxWarmPool` path comes after the end-to-end run. Pods are rendered as `Sandbox` directly for now.
 - **Credentials**: password fields for `GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
   Values are write-only: the plugin merge-patches them into the Secret `paseo-agent-credentials` (value sent on stdin,
