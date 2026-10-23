@@ -72,7 +72,23 @@ describe("pod workspace location", () => {
     const result = await registered[0].createWorkspace({ hostId: "h", project, settings: "go", idempotencyKey: "k", prompt: "do it" });
     expect(result).toEqual({ workspaceId: "w1", agentId: "a1" });
     expect(created.workspace[0].source).toEqual({ kind: "directory", path: "/home/me/repo", projectId: "p1" });
-    expect(created.agent[0]).toMatchObject({ config: { provider: "kube-agents" }, env: { PASEO_KUBE_TEMPLATE: "go" }, prompt: "do it" });
+    expect(created.agent[0]).toMatchObject({ config: { provider: "kube-agents/default" }, env: { PASEO_KUBE_TEMPLATE: "go" }, prompt: "do it" });
+  });
+
+  it("starts the agent on provider/model, as the daemon requires, from the New workspace form's inputs", async () => {
+    const { client, registered, created } = fakeClient(ready);
+    contributePodLocation(client);
+    // The exact inputs the form produced: project "Paseo Fork", default settings, prompt "Hello there!".
+    await registered[0].createWorkspace({
+      hostId: "anyshift-lab",
+      project: { id: "p9", name: "Paseo Fork", directory: "/home/paseo/src/paseo" },
+      settings: registered[0].defaultValue,
+      idempotencyKey: "draft-1",
+      prompt: "Hello there!",
+    });
+    expect(created.agent[0].config.provider).toMatch(/^[^/]+\/[^/]+$/);
+    expect(created.agent[0].config.provider).toBe("kube-agents/default");
+    expect(created.agent[0].prompt).toBe("Hello there!");
   });
 
   it("sets no template env for the default template", async () => {
