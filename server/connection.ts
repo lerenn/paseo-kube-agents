@@ -116,7 +116,15 @@ export async function connectKube(
       if (closed) throw new Error("kube-agents connection is closed");
       switch (input.type) {
         case "catalog":
-          emit({ type: "catalog", requestId: input.requestId, catalog: { models: [], modes: [] } });
+          emit({
+            type: "catalog",
+            requestId: input.requestId,
+            catalog: {
+              models: [{ id: "default", label: "Agent default", isDefault: true }],
+              modes: [],
+              defaultModel: "default",
+            },
+          });
           return;
         case "sessions":
           emit({ type: "sessions", requestId: input.requestId, sessions: [] });

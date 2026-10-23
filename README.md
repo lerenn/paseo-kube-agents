@@ -73,4 +73,4 @@ npm run typecheck && npm test
 dagger call all        # same as CI: typecheck, test, build in a container
 ```
 
-CI is `.github/workflows/ci.yml` running the Dagger module in `.dagger/` (same layout as agent-roles).
+CI is `.github/workflows/ci.yml` running the Dagger module in `.dagger/` (same layout as agents-roles).
