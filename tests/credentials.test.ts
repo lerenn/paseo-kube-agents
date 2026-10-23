@@ -42,26 +42,26 @@ describe("credentials", () => {
         return { code: 0, stdout: "", stderr: "" };
       }
     }
-    await new Spy({ namespace: "n" }).applySecretKey("s", "OPENAI_API_KEY", "{}");
+    await new Spy({ namespace: "n" }).applySecretKey("s", "CLAUDE_CODE_OAUTH_TOKEN", "{}");
     expect(seen.flat()).not.toContain("patch");
   });
 
   it("starts with every key not set", () => {
     expect(readStatus(statePath())).toEqual({
-      GH_TOKEN: false, CLAUDE_CODE_OAUTH_TOKEN: false, ANTHROPIC_API_KEY: false, OPENAI_API_KEY: false,
+      GH_TOKEN: false, CLAUDE_CODE_OAUTH_TOKEN: false,
     });
   });
 
   it("patches the named Secret and records only a boolean", async () => {
     const kube = new FakeKube();
     const path = statePath();
-    const status = await setCredential(kube, "paseo-agent-credentials", "OPENAI_API_KEY", "sk-secret", path);
-    expect(kube.patches[0]!.key).toBe("OPENAI_API_KEY");
-    expect(status.OPENAI_API_KEY).toBe(true);
+    const status = await setCredential(kube, "paseo-agent-credentials", "CLAUDE_CODE_OAUTH_TOKEN", "sk-secret", path);
+    expect(kube.patches[0]!.key).toBe("CLAUDE_CODE_OAUTH_TOKEN");
+    expect(status.CLAUDE_CODE_OAUTH_TOKEN).toBe(true);
     expect(status.GH_TOKEN).toBe(false);
     expect(readFileSync(path, "utf8")).not.toContain("sk-secret");
     expect(statSync(path).mode & 0o777).toBe(0o600);
-    expect(readStatus(path).OPENAI_API_KEY).toBe(true);
+    expect(readStatus(path).CLAUDE_CODE_OAUTH_TOKEN).toBe(true);
   });
 
   it("does not mark a key set, or leak the value, when the patch fails", async () => {

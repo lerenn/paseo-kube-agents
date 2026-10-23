@@ -5,8 +5,6 @@ import { z } from "zod";
 export const CREDENTIAL_KEYS = [
   "GH_TOKEN",
   "CLAUDE_CODE_OAUTH_TOKEN",
-  "ANTHROPIC_API_KEY",
-  "OPENAI_API_KEY",
 ] as const;
 
 export const CredentialKeySchema = z.enum(CREDENTIAL_KEYS);

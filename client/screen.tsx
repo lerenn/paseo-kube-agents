@@ -57,8 +57,6 @@ function StatusMark({ state, theme }: { state: boolean | null; theme: PluginScre
 const CREDENTIAL_LABELS: Record<CredentialKey, string> = {
   GH_TOKEN: "GitHub token (GH_TOKEN)",
   CLAUDE_CODE_OAUTH_TOKEN: "Claude OAuth token (CLAUDE_CODE_OAUTH_TOKEN)",
-  ANTHROPIC_API_KEY: "Anthropic API key (ANTHROPIC_API_KEY)",
-  OPENAI_API_KEY: "OpenAI API key (OPENAI_API_KEY)",
 };
 
 export const parseSelector = (text: string): Record<string, string> =>
@@ -77,14 +75,6 @@ const CREDENTIAL_HINTS: Record<CredentialKey, { text: string; link?: { href: str
   CLAUDE_CODE_OAUTH_TOKEN: {
     text: "Run on your machine, then paste the token:",
     command: "claude setup-token",
-  },
-  ANTHROPIC_API_KEY: {
-    text: "Alternative to the OAuth token.",
-    link: { href: "https://console.anthropic.com/settings/keys", label: "Create a key" },
-  },
-  OPENAI_API_KEY: {
-    text: "Only needed for Codex agents.",
-    link: { href: "https://platform.openai.com/api-keys", label: "Create a key" },
   },
 };
 

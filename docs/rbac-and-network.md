@@ -53,8 +53,7 @@ env vars in every agent pod:
 | key | use |
 | --- | --- |
 | `GH_TOKEN` | `git clone` (credential helper) and `gh`; a fine-grained token scoped to the repos agents may touch |
-| `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN` | claude |
-| `OPENAI_API_KEY` | codex (optional) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | claude (from `claude setup-token`) |
 
 The Secret is `optional` in the pod spec so the pod still starts without it.
 
