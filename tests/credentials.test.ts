@@ -8,10 +8,24 @@ import { FakeKube } from "./fakes.js";
 const statePath = () => join(mkdtempSync(join(tmpdir(), "kube-cred-")), "state.json");
 
 describe("credentials", () => {
-  it("builds a JSON patch with a base64 value", () => {
-    expect(JSON.parse(secretPatch("GH_TOKEN", "ghp_x"))).toEqual([
-      { op: "add", path: "/data/GH_TOKEN", value: Buffer.from("ghp_x").toString("base64") },
-    ]);
+  it("builds a merge patch with a base64 value, valid when the Secret has no data yet", () => {
+    expect(JSON.parse(secretPatch("GH_TOKEN", "ghp_x"))).toEqual({
+      data: { GH_TOKEN: Buffer.from("ghp_x").toString("base64") },
+    });
+  });
+
+  it("sends a merge patch on stdin, not argv", async () => {
+    const calls: string[][] = [];
+    const { Kubectl } = await import("../server/kube.js");
+    class Spy extends Kubectl {
+      async ok(args: string[], stdin?: string) {
+        calls.push([...args, stdin ?? ""]);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    }
+    await new Spy({ namespace: "paseo-agents" }).patchSecret("s", secretPatch("GH_TOKEN", "tok"));
+    expect(calls[0]!.slice(0, 5)).toEqual(["patch", "secret", "s", "--type=merge", "--patch-file=/dev/stdin"]);
+    expect(calls[0]!.slice(0, 5).join(" ")).not.toContain(Buffer.from("tok").toString("base64"));
   });
 
   it("starts with every key not set", () => {

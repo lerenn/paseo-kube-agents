@@ -8,9 +8,12 @@ export function defaultStatePath(): string {
   return join(homedir(), ".paseo", "kube-agents-credentials.json");
 }
 
-/** JSON Patch that sets one key of a Secret's `data` map. The value is base64, as Secrets require. */
+/**
+ * Merge patch that sets one key of a Secret's `data` map (base64, as Secrets require). A merge patch
+ * works when `data` is absent, which a JSON-patch `add /data/<key>` does not: the API server drops an empty `data`.
+ */
 export function secretPatch(key: CredentialKey, value: string): string {
-  return JSON.stringify([{ op: "add", path: `/data/${key}`, value: Buffer.from(value).toString("base64") }]);
+  return JSON.stringify({ data: { [key]: Buffer.from(value).toString("base64") } });
 }
 
 export function readStatus(path = defaultStatePath()): Record<string, boolean> {
