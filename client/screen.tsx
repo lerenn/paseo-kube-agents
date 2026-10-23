@@ -1,9 +1,7 @@
 import type { PluginScreenProps } from "@getpaseo/plugin/client";
 import { useRpc, useSettings } from "@getpaseo/plugin/client";
+import * as hostUi from "@getpaseo/plugin/client/ui";
 import {
-  ExternalLink,
-  Icon,
-  copyText,
   SettingsAction,
   SettingsCard,
   SettingsInput,
@@ -11,9 +9,50 @@ import {
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Linking, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { CREDENTIAL_KEYS, type CredentialKey, credentialsSet, credentialsStatus } from "../shared/credentials.js";
 import { type KubeAgentsConfig, kubeSettings } from "../shared/settings.js";
+
+/** Optional host components; older apps may not provide them, so never render an undefined element. */
+const optionalUi = hostUi as Partial<{
+  ExternalLink: typeof hostUi.ExternalLink;
+  copyText: typeof hostUi.copyText;
+}>;
+
+function Link({ href, color, children }: { href: string; color: string; children: string }) {
+  const HostLink = optionalUi.ExternalLink;
+  if (HostLink) return <HostLink href={href}>{children}</HostLink>;
+  return (
+    <Pressable accessibilityRole="link" onPress={() => void Linking.openURL(href).catch(() => undefined)}>
+      <Text style={{ color, textDecorationLine: "underline" }}>{children}</Text>
+    </Pressable>
+  );
+}
+
+/** Plain-View status marker: filled check when set, empty ring when not, dashed when unknown. */
+function StatusMark({ state, theme }: { state: boolean | null; theme: PluginScreenProps["theme"] }) {
+  const { colors } = theme;
+  const color = state ? colors.statusSuccess : colors.foregroundMuted;
+  return (
+    <View
+      accessible
+      accessibilityLabel={state === null ? "unknown" : state ? "set" : "not set"}
+      style={{
+        width: 16,
+        height: 16,
+        borderRadius: 8,
+        borderWidth: 1.5,
+        borderColor: color,
+        borderStyle: state === null ? "dashed" : "solid",
+        backgroundColor: state ? colors.statusSuccess : "transparent",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      {state ? <Text style={{ color: colors.surface0, fontSize: 10, lineHeight: 12 }}>✓</Text> : null}
+    </View>
+  );
+}
 
 const CREDENTIAL_LABELS: Record<CredentialKey, string> = {
   GH_TOKEN: "GitHub token (GH_TOKEN)",
@@ -104,18 +143,11 @@ function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenP
     }
   }, [setCredential, name, draft]);
 
-  const stateLabel = isSet === null ? "unknown" : isSet ? "set" : "not set";
   const { colors } = theme;
   return (
     <View style={{ padding: 12, gap: 8 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-        <View accessible accessibilityLabel={stateLabel}>
-          <Icon
-            name={isSet === null ? "CircleHelp" : isSet ? "CircleCheck" : "Circle"}
-            size={16}
-            color={isSet ? colors.statusSuccess : colors.foregroundMuted}
-          />
-        </View>
+        <StatusMark state={isSet} theme={theme} />
         <Text style={{ color: colors.foreground, flex: 1 }}>{CREDENTIAL_LABELS[name]}</Text>
       </View>
       <View style={{ gap: 4 }}>
@@ -125,17 +157,19 @@ function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenP
             <Text selectable style={{ color: colors.foreground, fontFamily: "monospace" }}>
               {CREDENTIAL_HINTS[name].command}
             </Text>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Copy ${CREDENTIAL_HINTS[name].command}`}
-              onPress={() => void copyText(CREDENTIAL_HINTS[name].command!).catch(() => undefined)}
-            >
-              <Icon name="Copy" size={14} color={colors.foregroundMuted} />
-            </Pressable>
+            {optionalUi.copyText ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Copy ${CREDENTIAL_HINTS[name].command}`}
+                onPress={() => void optionalUi.copyText!(CREDENTIAL_HINTS[name].command!).catch(() => undefined)}
+              >
+                <Text style={{ color: colors.accent }}>Copy</Text>
+              </Pressable>
+            ) : null}
           </View>
         ) : null}
         {CREDENTIAL_HINTS[name].link ? (
-          <ExternalLink href={CREDENTIAL_HINTS[name].link!.href}>{CREDENTIAL_HINTS[name].link!.label}</ExternalLink>
+          <Link href={CREDENTIAL_HINTS[name].link!.href} color={colors.accent}>{CREDENTIAL_HINTS[name].link!.label}</Link>
         ) : null}
       </View>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
