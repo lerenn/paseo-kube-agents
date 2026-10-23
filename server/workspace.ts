@@ -2,7 +2,6 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { REF_ENV_KEYS } from "../shared/pod-ref.js";
 import { WORKSPACE_ROOT } from "./sandbox.js";
-import type { Kube } from "./kube.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -11,7 +10,7 @@ export interface RepoRef {
   branch: string;
 }
 
-/** SSH remotes become https so the pod can clone with GH_TOKEN instead of a key. */
+/** SSH remotes become https so the remote is a plain URL without an ssh key requirement. */
 export function toHttpsRemote(url: string): string {
   const scp = /^[\w.-]+@([\w.-]+):(.+)$/.exec(url);
   if (scp) return `https://${scp[1]}/${scp[2]}`;
@@ -32,12 +31,6 @@ export async function detectRepo(cwd: string): Promise<RepoRef> {
 export function podWorkdir(sessionName: string): string {
   return `${WORKSPACE_ROOT}/${sessionName}`;
 }
-
-const HELPER = 'credential.helper=!f() { echo username=x-access-token; echo password=$GH_TOKEN; }; f';
-const CLONE_SCRIPT = `git -c "${HELPER}" clone --branch "$1" -- "$2" "$3"`;
-const CLONE_DEFAULT_SCRIPT = `git -c "${HELPER}" clone -- "$1" "$2"`;
-const CHECKOUT_NEW_BRANCH = 'git -C "$1" checkout -b "$2"';
-const FETCH_PR_SCRIPT = `git -c "${HELPER}" -C "$1" fetch origin "pull/$2/head:pr-$2" && git -C "$1" checkout "pr-$2"`;
 
 /** What Paseo's branch picker chose, handed to the provider through the agent's env. */
 export interface ClonePlan {
@@ -71,34 +64,4 @@ export function parseClonePlan(env: Readonly<Record<string, string>>): ClonePlan
 /** Repository name from a remote URL, for naming. */
 export function repoName(url: string): string {
   return url.replace(/\.git$/, "").split(/[/:]/).filter(Boolean).pop() ?? "repo";
-}
-
-async function run(kube: Kube, pod: string, script: string, args: string[], what: string): Promise<void> {
-  const result = await kube.exec(pod, ["sh", "-c", script, "sh", ...args]);
-  if (result.code !== 0) throw new Error(`${what} failed in pod: ${result.stderr.trim()}`);
-}
-
-/**
- * Clones into the pod. Only committed, pushed state is visible to the agent. Without a plan this
- * clones the daemon checkout's current branch; with one it follows the branch picker.
- */
-export async function cloneIntoPod(
-  kube: Kube,
-  pod: string,
-  repo: RepoRef,
-  dir: string,
-  plan?: ClonePlan | null,
-): Promise<void> {
-  if (!plan) {
-    return run(kube, pod, CLONE_SCRIPT, [repo.branch, repo.url, dir], `git clone of ${repo.url}@${repo.branch}`);
-  }
-  if (plan.pullRequest !== undefined) {
-    await run(kube, pod, CLONE_DEFAULT_SCRIPT, [repo.url, dir], `git clone of ${repo.url}`);
-    return run(kube, pod, FETCH_PR_SCRIPT, [dir, String(plan.pullRequest)], `checkout of PR #${plan.pullRequest}`);
-  }
-  const base = plan.branch ?? repo.branch;
-  await run(kube, pod, CLONE_SCRIPT, [base, repo.url, dir], `git clone of ${repo.url}@${base}`);
-  if (plan.action === "branch-off" && plan.slug) {
-    await run(kube, pod, CHECKOUT_NEW_BRANCH, [dir, plan.slug], `creating branch ${plan.slug}`);
-  }
 }

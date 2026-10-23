@@ -56,7 +56,6 @@ function StatusMark({ state, theme }: { state: boolean | null; theme: PluginScre
 }
 
 const CREDENTIAL_LABELS: Record<CredentialKey, string> = {
-  GH_TOKEN: "GitHub token (GH_TOKEN)",
   CLAUDE_CODE_OAUTH_TOKEN: "Claude OAuth token (CLAUDE_CODE_OAUTH_TOKEN)",
 };
 
@@ -69,10 +68,6 @@ export const parseSelector = (text: string): Record<string, string> =>
   );
 
 const CREDENTIAL_HINTS: Record<CredentialKey, { text: string; link?: { href: string; label: string }; command?: string }> = {
-  GH_TOKEN: {
-    text: "Fine-grained token. Needs Contents and Pull requests read/write, Metadata read.",
-    link: { href: "https://github.com/settings/personal-access-tokens/new", label: "Create a token" },
-  },
   CLAUDE_CODE_OAUTH_TOKEN: {
     text: "Run on your machine, then paste the token:",
     command: "claude setup-token",
