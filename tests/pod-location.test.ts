@@ -69,10 +69,12 @@ describe("pod workspace location", () => {
   it("creates the workspace and a kube-agents agent with the chosen template", async () => {
     const { client, registered, created } = fakeClient(ready);
     contributePodLocation(client);
-    const result = await registered[0].createWorkspace({ hostId: "h", project, settings: "go", idempotencyKey: "k", prompt: "do it" });
+    const result = await registered[0].createWorkspace({ hostId: "h", project, settings: "go", idempotencyKey: "k", prompt: "do it", slug: "brave-otter-12", ref: { action: "branch-off", refName: "refs/heads/main" } });
     expect(result).toEqual({ workspaceId: "w1", agentId: "a1" });
+    expect(created.workspace[0].title).toBe("repo-brave-otter-12");
+    expect(registered[0].usesRef).toBe(true);
     expect(created.workspace[0].source).toEqual({ kind: "directory", path: "/home/me/repo", projectId: "p1" });
-    expect(created.agent[0]).toMatchObject({ config: { provider: "kube-agents/default" }, env: { PASEO_KUBE_TEMPLATE: "go" }, prompt: "do it" });
+    expect(created.agent[0]).toMatchObject({ config: { provider: "kube-agents/default" }, env: { PASEO_KUBE_TEMPLATE: "go", PASEO_KUBE_SLUG: "brave-otter-12", PASEO_KUBE_ACTION: "branch-off", PASEO_KUBE_REF: "refs/heads/main" }, prompt: "do it" });
   });
 
   it("starts the agent on provider/model, as the daemon requires, from the New workspace form's inputs", async () => {
@@ -85,6 +87,8 @@ describe("pod workspace location", () => {
       settings: registered[0].defaultValue,
       idempotencyKey: "draft-1",
       prompt: "Hello there!",
+      slug: "brave-otter-12",
+      ref: { action: "branch-off", refName: "refs/heads/main" },
     });
     expect(created.agent[0].config.provider).toMatch(/^[^/]+\/[^/]+$/);
     expect(created.agent[0].config.provider).toBe("kube-agents/default");
@@ -94,14 +98,14 @@ describe("pod workspace location", () => {
   it("sets no template env for the default template", async () => {
     const { client, registered, created } = fakeClient(ready);
     contributePodLocation(client);
-    await registered[0].createWorkspace({ hostId: "h", project, settings: "default", idempotencyKey: "k", prompt: "" });
-    expect(created.agent[0].env).toEqual({});
+    await registered[0].createWorkspace({ hostId: "h", project, settings: "default", idempotencyKey: "k", prompt: "", slug: "s1", ref: null });
+    expect(created.agent[0].env).toEqual({ PASEO_KUBE_SLUG: "s1" });
   });
 
   it("refuses to create when credentials are missing", async () => {
     const { client, registered, created } = fakeClient({ ...ready, GH_TOKEN: false });
     contributePodLocation(client);
-    await expect(registered[0].createWorkspace({ hostId: "h", project, settings: "default", idempotencyKey: "k", prompt: "" })).rejects.toThrow(/Kube Agents screen/);
+    await expect(registered[0].createWorkspace({ hostId: "h", project, settings: "default", idempotencyKey: "k", prompt: "", slug: "s", ref: null })).rejects.toThrow(/Kube Agents screen/);
     expect(created.workspace).toHaveLength(0);
   });
 
