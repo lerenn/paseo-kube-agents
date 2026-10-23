@@ -15,8 +15,8 @@ export interface Kube {
   /** Long-lived stdio JSON-RPC (ndjson) stream to a process inside the pod. */
   execStream(pod: string, argv: string[]): AcpStream;
   delete(kind: string, name: string): Promise<void>;
-  /** Applies a JSON Patch to a Secret. The patch travels on stdin, never on argv. */
-  patchSecret(name: string, jsonPatch: string): Promise<void>;
+  /** Applies a merge patch to a Secret. The patch travels on stdin, never on argv. */
+  patchSecret(name: string, mergePatch: string): Promise<void>;
 }
 
 export interface KubectlOptions {
@@ -90,7 +90,7 @@ export class Kubectl implements Kube {
     this.base = [...(options.context ? ["--context", options.context] : []), "-n", options.namespace];
   }
 
-  private async ok(args: string[], stdin?: string): Promise<ExecResult> {
+  protected async ok(args: string[], stdin?: string): Promise<ExecResult> {
     const result = await run(this.binary, [...this.base, ...args], stdin);
     if (result.code !== 0) {
       throw new Error(`kubectl ${args.slice(0, 2).join(" ")} failed: ${result.stderr.trim()}`);
@@ -117,8 +117,8 @@ export class Kubectl implements Kube {
     return ndjsonStream(child);
   }
 
-  async patchSecret(name: string, jsonPatch: string): Promise<void> {
-    await this.ok(["patch", "secret", name, "--type=json", "--patch-file=/dev/stdin"], jsonPatch);
+  async patchSecret(name: string, mergePatch: string): Promise<void> {
+    await this.ok(["patch", "secret", name, "--type=merge", "--patch-file=/dev/stdin"], mergePatch);
   }
 
   async delete(kind: string, name: string): Promise<void> {

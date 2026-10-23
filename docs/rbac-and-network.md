@@ -37,9 +37,9 @@ rules:
 ```
 
 The daemon never gets `get`/`list`/`watch`/`create` on secrets, so it cannot read credentials back; the pod
-reads the Secret through `envFrom` via the kubelet. The plugin sets a key with a JSON patch
-(`kubectl patch secret paseo-agent-credentials --type=json -p '[{"op":"add","path":"/data/GH_TOKEN","value":"<base64>"}]'`),
-which needs the Secret to exist with a non-null `data` map, so the lab creates a placeholder (`data: {}`).
+reads the Secret through `envFrom` via the kubelet. The plugin sets a key with a merge patch sent on stdin
+(`kubectl patch secret paseo-agent-credentials --type=merge --patch-file=/dev/stdin` with `{"data":{"GH_TOKEN":"<base64>"}}`),
+which works even when the Secret has no `data` (the API server drops an empty one, so a JSON-patch `add /data/<key>` returns 422).
 Because values can't be read, the UI's "set / not set" comes from plugin-local state, not the cluster. No ClusterRole needed. Future (not in the PoC):
 `sandboxclaims`/`sandboxwarmpools` + `sandboxtemplates` (extensions.agents.x-k8s.io) get/list/create/delete.
 
