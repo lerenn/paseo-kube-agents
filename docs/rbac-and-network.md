@@ -36,6 +36,22 @@ rules:
     verbs: ["patch", "update"]                                      # write-only credentials from the plugin UI
 ```
 
+### Later: warm pools and git-sourced templates (not needed for the PoC)
+
+Same namespaced Role, extra rule (no ClusterRole, nothing outside `paseo-agents`):
+
+```yaml
+  - apiGroups: ["extensions.agents.x-k8s.io"]
+    resources: ["sandboxtemplates", "sandboxwarmpools", "sandboxclaims"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+```
+
+- `create`/`patch` (server-side apply) reconcile templates and pools; `list` + `delete` prune objects that disappeared
+  from git, selected by the label `app.kubernetes.io/managed-by=paseo-kube-agents` plus `paseo.sh/source=git`, so
+  UI-created objects are never touched; `sandboxclaims` are created per session and deleted on close.
+- Fetching the git source runs on the daemon (shallow clone with the daemon's git credentials); it needs no
+  cluster permission and the pods' NetworkPolicy is unchanged.
+
 The daemon never gets `get`/`list`/`watch`/`create` on secrets, so it cannot read credentials back; the pod
 reads the Secret through `envFrom` via the kubelet. The plugin sets a key with a JSON patch
 (`kubectl patch secret paseo-agent-credentials --type=json -p '[{"op":"add","path":"/data/GH_TOKEN","value":"<base64>"}]'`),
