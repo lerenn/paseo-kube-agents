@@ -23,6 +23,21 @@ describe("sandbox manifest", () => {
     expect(c.env).toBeUndefined();
   });
 
+  it("applies the global node selector and tolerations unless the template sets its own", () => {
+    const c = ConfigSchema.parse({
+      nodeSelector: { "lab.anyshift.io/pool": "burst" },
+      tolerationKeys: ["lab.anyshift.io/burst"],
+      templates: { go: { nodeSelector: { pool: "x" } } },
+    });
+    const spec = (name: string, t: any) =>
+      (buildSandbox({ name: "n", sessionId: "s", templateName: name, template: t, config: c }) as any).spec.podTemplate.spec;
+    const pool = { enabled: false, size: 1, idleTimeoutSeconds: 900 };
+    const def = spec("default", { warmPool: pool });
+    expect(def.nodeSelector).toEqual({ "lab.anyshift.io/pool": "burst" });
+    expect(def.tolerations).toEqual([{ key: "lab.anyshift.io/burst", operator: "Exists" }]);
+    expect(spec("go", c.templates.go).nodeSelector).toEqual({ pool: "x" });
+  });
+
   it("makes DNS-safe names", () => {
     expect(sandboxName("Sess_ID/With Weird!")).toMatch(/^pka-sess-id-with-weird-[0-9a-f]{6}$/);
   });

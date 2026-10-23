@@ -32,7 +32,12 @@ export function createProvider(getConfig: () => Promise<KubeAgentsConfig>): Prov
         config,
         kube,
         acpProvider: (connector) =>
-          runAcpProvider({ id: "kube-agents", label: "Kube agents", connector }),
+          runAcpProvider({
+            id: "kube-agents",
+            label: "Kube agents",
+            connector,
+            acpOptions: { startupTimeoutMs: 180_000 },
+          }),
       });
     },
   };

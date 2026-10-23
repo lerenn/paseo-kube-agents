@@ -40,6 +40,10 @@ export const ConfigSchema = z.object({
   readyTimeoutSeconds: z.number().int().positive().default(300),
   /** Hard cap on pod lifetime, in seconds, enforced by the Sandbox controller. */
   maxLifetimeSeconds: z.number().int().positive().default(8 * 3600),
+  /** Pod placement for every template that does not set its own (e.g. {"lab.anyshift.io/pool": "burst"}). */
+  nodeSelector: z.record(z.string(), z.string()).default({}),
+  /** Taint keys every pod tolerates (operator Exists), for templates without their own tolerations. */
+  tolerationKeys: z.array(z.string()).default([]),
   /** Named pod templates; "default" always exists. */
   templates: z.record(z.string(), TemplateSchema).default({}),
 });
