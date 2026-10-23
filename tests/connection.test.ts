@@ -19,7 +19,7 @@ const fakeClock = () => {
 function setup(overrides: Partial<ReturnType<typeof ConfigSchema.parse>> = {}) {
   const kube = new FakeKube();
   const acp = new FakeAcp();
-  const config = ConfigSchema.parse({ templates: { go: { image: "go:1" } }, ...overrides });
+  const config = ConfigSchema.parse({ image: "go:1", ...overrides });
   const events: ProviderEvent[] = [];
   const conn = connectKube(request, { config, kube, acpProvider: acp.provider, detectRepo: repo, sleep: async () => undefined, now: fakeClock() });
   return { kube, acp, events, conn };
@@ -100,10 +100,10 @@ describe("kube connection", () => {
     expect(isPreapproved(undefined, ["mcp__my_server__do"])).toBe(false);
   });
 
-  it("selects the pod template from PASEO_KUBE_TEMPLATE", async () => {
+  it("runs the configured image", async () => {
     const { kube, conn: p } = setup();
     const conn = await p;
-    await conn.send({ type: "session.open", requestId: "r", sessionId: "s", config: sessionConfig({ PASEO_KUBE_TEMPLATE: "go" }), history: "skip" });
+    await conn.send({ type: "session.open", requestId: "r", sessionId: "s", config: sessionConfig(), history: "skip" });
     expect((kube.applied[0] as any).spec.podTemplate.spec.containers[0].image).toBe("go:1");
   });
 
@@ -209,15 +209,6 @@ describe("kube connection edge cases", () => {
     expect(events.at(-1)).toMatchObject({ type: "request.failed", error: { message: expect.stringContaining("agent crashed") } });
     expect(acp.closed).toBe(true);
     expect(kube.calls.some((c) => c.startsWith("delete:sandbox/"))).toBe(true);
-  });
-
-  it("fails fast on an unknown template without creating anything", async () => {
-    const { kube, events, conn: p } = setup();
-    const conn = await p;
-    conn.onEvent((e) => events.push(e));
-    await open(conn, "s", { PASEO_KUBE_TEMPLATE: "rust" });
-    expect(kube.applied).toHaveLength(0);
-    expect(events[0]).toMatchObject({ type: "request.failed", error: { message: expect.stringContaining("Known templates") } });
   });
 
   it("offers an agent-default model in the catalog so provider/model resolves", async () => {

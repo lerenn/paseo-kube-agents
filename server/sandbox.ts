@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { KubeAgentsConfig, TemplateConfig } from "./config.js";
+import type { KubeAgentsConfig } from "./config.js";
 
 export const MANAGED_BY_LABEL = "app.kubernetes.io/managed-by";
 export const MANAGED_BY = "paseo-kube-agents";
@@ -7,7 +7,7 @@ export const WORKSPACE_ROOT = "/workspace";
 /** Claude's session state lives under HOME, so HOME is on the workspace volume to survive pod restarts. */
 export const HOME_DIR = `${WORKSPACE_ROOT}/.home`;
 export const WORKSPACE_VOLUME = "workspace";
-/** The Sandbox controller names the claim `<template name>-<sandbox name>`. */
+/** The Sandbox controller names the claim `<claim template name>-<sandbox name>`. */
 export const workspaceClaimName = (sandbox: string) => `${WORKSPACE_VOLUME}-${sandbox}`;
 
 const slugify = (text: string, max: number) =>
@@ -22,17 +22,14 @@ export function sandboxName(sessionId: string, repo?: string, slug?: string): st
 export interface SandboxSpecInput {
   name: string;
   sessionId: string;
-  templateName: string;
-  template: TemplateConfig;
   config: KubeAgentsConfig;
 }
 
 /** A `Sandbox` (agents.x-k8s.io) whose single container idles; the agent is started by `kubectl exec`. */
 export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
-  const { name, sessionId, templateName, template, config } = input;
+  const { name, sessionId, config } = input;
   const labels = {
     [MANAGED_BY_LABEL]: MANAGED_BY,
-    "paseo.sh/kube-template": templateName,
   };
   return {
     apiVersion: config.sandboxApiVersion,
@@ -54,16 +51,16 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
           restartPolicy: "Never",
           automountServiceAccountToken: false,
           securityContext: { runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000 },
-          ...placement(template, config),
+          ...placement(config),
           containers: [
             {
               name: "agent",
-              image: template.image ?? config.defaultImage,
+              image: config.image,
               command: ["sh", "-c", `mkdir -p "${HOME_DIR}" && exec sleep infinity`],
               workingDir: WORKSPACE_ROOT,
               env: [{ name: "HOME", value: HOME_DIR }],
               envFrom: [{ secretRef: { name: config.credentialsSecret, optional: true } }],
-              ...(template.resources ? { resources: template.resources } : {}),
+              ...(config.resources ? { resources: config.resources } : {}),
               volumeMounts: [{ name: WORKSPACE_VOLUME, mountPath: WORKSPACE_ROOT }],
             },
           ],
@@ -75,10 +72,9 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
   };
 }
 
-function placement(template: TemplateConfig, config: KubeAgentsConfig) {
-  const nodeSelector = template.nodeSelector ?? config.nodeSelector;
-  const tolerations =
-    template.tolerations ?? config.tolerationKeys.map((key) => ({ key, operator: "Exists" }));
+function placement(config: KubeAgentsConfig) {
+  const { nodeSelector } = config;
+  const tolerations = config.tolerationKeys.map((key) => ({ key, operator: "Exists" }));
   return {
     ...(Object.keys(nodeSelector).length > 0 ? { nodeSelector } : {}),
     ...(tolerations.length > 0 ? { tolerations } : {}),

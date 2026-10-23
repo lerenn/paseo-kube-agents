@@ -1,6 +1,5 @@
 # Fat default image for kube-agents pods. Contains NO credentials: tokens arrive at runtime
-# through the paseo-agent-credentials Secret (envFrom). Named templates (go, node, infra)
-# build FROM this image and add toolchains.
+# through the paseo-agent-credentials Secret (envFrom).
 FROM node:22-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends \

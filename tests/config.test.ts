@@ -1,40 +1,65 @@
 import { describe, expect, it } from "vitest";
-import { ConfigSchema, resolveTemplate, resolveTemplateName } from "../server/config.js";
+import { ConfigSchema, kubeSettings, migrateSettings } from "../shared/settings.js";
 
-describe("config", () => {
-  it("defaults to the paseo-agents namespace", () => {
-    expect(ConfigSchema.parse({}).namespace).toBe("paseo-agents");
+describe("settings schema", () => {
+  it("parses an empty document into a complete flat config", () => {
+    const c = ConfigSchema.parse({});
+    expect(c.namespace).toBe("paseo-agents");
+    expect(c.credentialsSecret).toBe("paseo-agent-credentials");
+    expect(c.image).toMatch(/paseo-kube-agents-default/);
+    expect(c).not.toHaveProperty("templates");
   });
 
-  it("reads the template from session env, then daemon env, else default", () => {
-    expect(resolveTemplateName({ PASEO_KUBE_TEMPLATE: "go" }, { PASEO_KUBE_TEMPLATE: "node" })).toBe("go");
-    expect(resolveTemplateName({}, { PASEO_KUBE_TEMPLATE: "node" })).toBe("node");
-    expect(resolveTemplateName({}, {})).toBe("default");
-  });
-
-  it("rejects unknown templates and lists the known ones", () => {
-    const config = ConfigSchema.parse({ templates: { go: { image: "x" } } });
-    expect(resolveTemplate(config, "go").image).toBe("x");
-    expect(resolveTemplate(config, "default").image).toBeUndefined();
-    expect(() => resolveTemplate(config, "rust")).toThrow(/Known templates: default, go/);
+  it("is version 2 with a migration", () => {
+    expect(kubeSettings.version).toBe(2);
+    expect(kubeSettings.migrate).toBeDefined();
   });
 });
 
-describe("settings schema", () => {
-  it("parses an empty document into a complete config", () => {
-    const c = ConfigSchema.parse({});
-    expect(c.templates).toEqual({});
-    expect(c.credentialsSecret).toBe("paseo-agent-credentials");
+describe("migrating v1 settings (templates) to the flat configuration", () => {
+  const migrate = (v: object) => ConfigSchema.parse(migrateSettings(v, 1));
+
+  it("folds the default template's image, resources and placement into the flat settings", () => {
+    const c = migrate({
+      namespace: "ns",
+      defaultImage: "node:22-bookworm",
+      nodeSelector: {},
+      tolerationKeys: [],
+      templates: {
+        default: {
+          image: "go:1",
+          resources: { requests: { cpu: "2" } },
+          nodeSelector: { pool: "burst" },
+          tolerations: [{ key: "burst", operator: "Exists" }],
+          warmPool: { enabled: true, size: 2, idleTimeoutSeconds: 900 },
+        },
+        go: { image: "other" },
+      },
+    });
+    expect(c.namespace).toBe("ns");
+    expect(c.image).toBe("go:1");
+    expect(c.resources).toEqual({ requests: { cpu: "2" } });
+    expect(c.nodeSelector).toEqual({ pool: "burst" });
+    expect(c.tolerationKeys).toEqual(["burst"]);
+    expect(c).not.toHaveProperty("templates");
   });
 
-  it("defaults warm pools to off and small", () => {
-    const c = ConfigSchema.parse({ templates: { go: { image: "go:1" } } });
-    expect(c.templates.go?.warmPool).toEqual({ enabled: false, size: 1, idleTimeoutSeconds: 900 });
-    expect(resolveTemplate(c, "default").warmPool.enabled).toBe(false);
+  it("keeps defaultImage and the global placement when the default template has none (Louis's setup)", () => {
+    const c = migrate({
+      defaultImage: "node:22-bookworm",
+      agentCommand: ["npx", "-y", "@agentclientprotocol/claude-agent-acp"],
+      nodeSelector: { "lab.anyshift.io/pool": "burst" },
+      tolerationKeys: ["lab.anyshift.io/burst"],
+      templates: {},
+    });
+    expect(c.image).toBe("node:22-bookworm");
+    expect(c.agentCommand).toEqual(["npx", "-y", "@agentclientprotocol/claude-agent-acp"]);
+    expect(c.nodeSelector).toEqual({ "lab.anyshift.io/pool": "burst" });
+    expect(c.tolerationKeys).toEqual(["lab.anyshift.io/burst"]);
   });
 
-  it("rejects out-of-range warm pool values", () => {
-    expect(() => ConfigSchema.parse({ templates: { go: { warmPool: { size: 99 } } } })).toThrow();
-    expect(() => ConfigSchema.parse({ templates: { go: { warmPool: { idleTimeoutSeconds: 5 } } } })).toThrow();
+  it("leaves current documents alone", () => {
+    const doc = { image: "x" };
+    expect(migrateSettings(doc, 2)).toBe(doc);
   });
 });

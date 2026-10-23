@@ -7,10 +7,9 @@ import { waitPodReady } from "../server/pod-wait.js";
 import { buildSandbox, workspaceClaimName } from "../server/sandbox.js";
 import { FakeAcp, FakeKube } from "./fakes.js";
 
-const pool = { enabled: false, size: 1, idleTimeoutSeconds: 900 };
 const manifest = (storage?: object) => {
   const config = ConfigSchema.parse(storage ? { storage } : {});
-  return buildSandbox({ name: "n", sessionId: "s", templateName: "default", template: { warmPool: pool }, config, }) as any;
+  return buildSandbox({ name: "n", sessionId: "s", config }) as any;
 };
 
 describe("workspace storage manifest", () => {
