@@ -10,8 +10,8 @@ The default `sandboxApiVersion` is `agents.x-k8s.io/v1beta1`; confirm with
 
 ## 2. Namespace
 
-`paseo-agents`, on the Karpenter burst pool. Pods get the pool through the template's
-`nodeSelector`/`tolerations` in kube-agents config (the lab agent should tell us the labels/taints).
+`paseo-agents`, on the Karpenter burst pool. Pods get the pool through the node selector and
+tolerated taint keys in the Kube Agents settings (the lab agent should tell us the labels/taints).
 Suggested labels: `pod-security.kubernetes.io/enforce: baseline` (pods run non-root, no SA token).
 
 ## 3. RBAC for the daemon ServiceAccount (Role + RoleBinding in `paseo-agents`)

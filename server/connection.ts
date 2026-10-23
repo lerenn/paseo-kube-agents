@@ -7,11 +7,7 @@ import type {
   ProviderToolPolicy,
 } from "@getpaseo/plugin/server/provider";
 import type { AcpConnector } from "@getpaseo/plugin/server/acp";
-import {
-  type KubeAgentsConfig,
-  resolveTemplate,
-  resolveTemplateName,
-} from "./config.js";
+import type { KubeAgentsConfig } from "./config.js";
 import type { Kube } from "./kube.js";
 import { buildSandbox, sandboxName } from "./sandbox.js";
 import { REF_ENV_KEYS } from "../shared/pod-ref.js";
@@ -89,14 +85,12 @@ export async function connectKube(
 
   async function open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     const { sessionId, config: session } = input;
-    const templateName = resolveTemplateName(session.env);
-    const template = resolveTemplate(config, templateName);
     const repo = await (deps.detectRepo ?? detectRepo)(session.cwd);
     const plan = parseClonePlan(session.env);
     const name = sandboxName(sessionId, repoName(repo.url), session.env[REF_ENV_KEYS.slug]);
     const podCwd = podWorkdir(name);
 
-    await kube.apply(buildSandbox({ name, sessionId, templateName, template, config }));
+    await kube.apply(buildSandbox({ name, sessionId, config }));
     let inner: ProviderConnection | undefined;
     try {
       await kube.waitReady("sandbox", name, config.readyTimeoutSeconds);

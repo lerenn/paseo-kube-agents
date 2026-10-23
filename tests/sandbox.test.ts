@@ -4,10 +4,10 @@ import { buildSandbox, sandboxName } from "../server/sandbox.js";
 import { toHttpsRemote } from "../server/workspace.js";
 
 describe("sandbox manifest", () => {
-  const config = ConfigSchema.parse({ templates: { go: { image: "go:1", nodeSelector: { pool: "burst" } } } });
+  const config = ConfigSchema.parse({ image: "go:1", nodeSelector: { pool: "burst" } });
 
-  it("builds a Sandbox in the configured namespace with the template image", () => {
-    const sb = buildSandbox({ name: "pka-x", sessionId: "s1", templateName: "go", template: config.templates.go!, config }) as any;
+  it("builds a Sandbox in the configured namespace with the configured image", () => {
+    const sb = buildSandbox({ name: "pka-x", sessionId: "s1", config }) as any;
     expect(sb.kind).toBe("Sandbox");
     expect(sb.apiVersion).toBe("agents.x-k8s.io/v1beta1");
     expect(sb.metadata.namespace).toBe("paseo-agents");
@@ -20,25 +20,25 @@ describe("sandbox manifest", () => {
   });
 
   it("injects credentials from a Secret, never inline", () => {
-    const sb = buildSandbox({ name: "n", sessionId: "s", templateName: "default", template: { warmPool: { enabled: false, size: 1, idleTimeoutSeconds: 900 } }, config }) as any;
+    const sb = buildSandbox({ name: "n", sessionId: "s", config }) as any;
     const c = sb.spec.podTemplate.spec.containers[0];
     expect(c.envFrom[0].secretRef.name).toBe("paseo-agent-credentials");
     expect(c.env).toBeUndefined();
   });
 
-  it("applies the global node selector and tolerations unless the template sets its own", () => {
+  it("applies the node selector and tolerations", () => {
     const c = ConfigSchema.parse({
       nodeSelector: { "lab.anyshift.io/pool": "burst" },
       tolerationKeys: ["lab.anyshift.io/burst"],
-      templates: { go: { nodeSelector: { pool: "x" } } },
     });
-    const spec = (name: string, t: any) =>
-      (buildSandbox({ name: "n", sessionId: "s", templateName: name, template: t, config: c }) as any).spec.podTemplate.spec;
-    const pool = { enabled: false, size: 1, idleTimeoutSeconds: 900 };
-    const def = spec("default", { warmPool: pool });
-    expect(def.nodeSelector).toEqual({ "lab.anyshift.io/pool": "burst" });
-    expect(def.tolerations).toEqual([{ key: "lab.anyshift.io/burst", operator: "Exists" }]);
-    expect(spec("go", c.templates.go).nodeSelector).toEqual({ pool: "x" });
+    const spec = (buildSandbox({ name: "n", sessionId: "s", config: c }) as any).spec.podTemplate.spec;
+    expect(spec.nodeSelector).toEqual({ "lab.anyshift.io/pool": "burst" });
+    expect(spec.tolerations).toEqual([{ key: "lab.anyshift.io/burst", operator: "Exists" }]);
+  });
+
+  it("passes resources through when set", () => {
+    const c = ConfigSchema.parse({ resources: { requests: { cpu: "1" } } });
+    expect((buildSandbox({ name: "n", sessionId: "s", config: c }) as any).spec.podTemplate.spec.containers[0].resources).toEqual({ requests: { cpu: "1" } });
   });
 
   it("makes DNS-safe names", () => {

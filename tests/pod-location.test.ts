@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { contributePodLocation, credentialsReady, podSettingsValue } from "../client/pod-location.js";
+import { contributePodLocation, credentialsReady } from "../client/pod-location.js";
 
 const project = { id: "p1", name: "repo", directory: "/home/me/repo" };
 
@@ -49,7 +49,8 @@ describe("pod workspace location", () => {
   it("registers a Pod option and removes it on cleanup", () => {
     const { client, registered } = fakeClient(ready);
     const cleanup = contributePodLocation(client);
-    expect(registered[0]).toMatchObject({ id: "pod", title: "Pod", defaultValue: "default" });
+    expect(registered[0]).toMatchObject({ id: "pod", title: "Pod" });
+    expect(registered[0].Settings).toBeUndefined(); // one pod configuration: nothing to choose
     cleanup();
     expect(registered).toHaveLength(0);
   });
@@ -66,15 +67,15 @@ describe("pod workspace location", () => {
     expect(missing.registered[0].isAvailable({ hostId: "h", project })).toBe(false);
   });
 
-  it("creates the workspace and a kube-agents agent with the chosen template", async () => {
+  it("creates the workspace and a kube-agents agent from the picked ref", async () => {
     const { client, registered, created } = fakeClient(ready);
     contributePodLocation(client);
-    const result = await registered[0].createWorkspace({ hostId: "h", project, settings: "go", idempotencyKey: "k", prompt: "do it", slug: "brave-otter-12", ref: { action: "branch-off", refName: "refs/heads/main" } });
+    const result = await registered[0].createWorkspace({ hostId: "h", project, settings: undefined, idempotencyKey: "k", prompt: "do it", slug: "brave-otter-12", ref: { action: "branch-off", refName: "refs/heads/main" } });
     expect(result).toEqual({ workspaceId: "w1", agentId: "a1" });
     expect(created.workspace[0].title).toBe("repo-brave-otter-12");
     expect(registered[0].usesRef).toBe(true);
     expect(created.workspace[0].source).toEqual({ kind: "directory", path: "/home/me/repo", projectId: "p1" });
-    expect(created.agent[0]).toMatchObject({ config: { provider: "kube-agents/default" }, env: { PASEO_KUBE_TEMPLATE: "go", PASEO_KUBE_SLUG: "brave-otter-12", PASEO_KUBE_ACTION: "branch-off", PASEO_KUBE_REF: "refs/heads/main" }, prompt: "do it" });
+    expect(created.agent[0]).toMatchObject({ config: { provider: "kube-agents/default" }, env: { PASEO_KUBE_SLUG: "brave-otter-12", PASEO_KUBE_ACTION: "branch-off", PASEO_KUBE_REF: "refs/heads/main" }, prompt: "do it" });
   });
 
   it("starts the agent on provider/model, as the daemon requires, from the New workspace form's inputs", async () => {
@@ -84,7 +85,7 @@ describe("pod workspace location", () => {
     await registered[0].createWorkspace({
       hostId: "anyshift-lab",
       project: { id: "p9", name: "Paseo Fork", directory: "/home/paseo/src/paseo" },
-      settings: registered[0].defaultValue,
+      settings: undefined,
       idempotencyKey: "draft-1",
       prompt: "Hello there!",
       slug: "brave-otter-12",
@@ -95,13 +96,6 @@ describe("pod workspace location", () => {
     expect(created.agent[0].prompt).toBe("Hello there!");
   });
 
-  it("sets no template env for the default template", async () => {
-    const { client, registered, created } = fakeClient(ready);
-    contributePodLocation(client);
-    await registered[0].createWorkspace({ hostId: "h", project, settings: "default", idempotencyKey: "k", prompt: "", slug: "s1", ref: null });
-    expect(created.agent[0].env).toEqual({ PASEO_KUBE_SLUG: "s1" });
-  });
-
   it("refuses to create when credentials are missing", async () => {
     const { client, registered, created } = fakeClient({ ...ready, GH_TOKEN: false });
     contributePodLocation(client);
@@ -110,8 +104,6 @@ describe("pod workspace location", () => {
   });
 
   it("normalizes the settings value and credential readiness", () => {
-    expect(podSettingsValue(undefined)).toBe("default");
-    expect(podSettingsValue("go")).toBe("go");
     expect(credentialsReady({ GH_TOKEN: true, CLAUDE_CODE_OAUTH_TOKEN: true })).toBe(true);
     expect(credentialsReady({ GH_TOKEN: true })).toBe(false);
     expect(credentialsReady({ CLAUDE_CODE_OAUTH_TOKEN: true })).toBe(false);
