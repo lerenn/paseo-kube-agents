@@ -1,0 +1,8 @@
+{
+  "id": "kube-agents",
+  "name": "Kube agents",
+  "description": "Run each Paseo agent in its own Kubernetes pod.",
+  "requirements": {
+    "paseo": ">=0.11.2"
+  }
+}

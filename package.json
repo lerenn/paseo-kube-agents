@@ -1,0 +1,25 @@
+{
+  "name": "paseo-kube-agents",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Run each Paseo agent in its own Kubernetes pod.",
+  "license": "MIT",
+  "files": [
+    "paseo-plugin.json",
+    "OVERVIEW.md",
+    "index.server.ts",
+    "server/"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "build": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@getpaseo/plugin": "0.11.2",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.0",
+    "zod": "^4.4.3"
+  }
+}
