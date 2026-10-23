@@ -89,3 +89,106 @@ describe("kube connection", () => {
     expect(kube.calls.filter((c) => c.startsWith("delete:"))).toHaveLength(2);
   });
 });
+
+describe("kube connection edge cases", () => {
+  const open = (conn: Awaited<ReturnType<typeof connectKube>>, id: string, env: Record<string, string> = {}) =>
+    conn.send({ type: "session.open", requestId: `r-${id}`, sessionId: id, config: sessionConfig(env), history: "skip" });
+
+  it("gives each session its own sandbox and routes inputs by session", async () => {
+    const { kube, acp, conn: p } = setup();
+    const conn = await p;
+    await open(conn, "a");
+    await open(conn, "b");
+    const names = kube.applied.map((m: any) => m.metadata.name);
+    expect(new Set(names).size).toBe(2);
+    await conn.send({ type: "session.interrupt", requestId: "i", sessionId: "b" });
+    expect(acp.inputs.at(-1)).toMatchObject({ type: "session.interrupt", sessionId: "b" });
+    await conn.send({ type: "session.close", requestId: "c", sessionId: "a" });
+    expect(kube.calls.filter((c) => c === `delete:sandbox/${names[0]}`)).toHaveLength(1);
+    expect(kube.calls).not.toContain(`delete:sandbox/${names[1]}`);
+  });
+
+  it("rejects inputs for unknown sessions and after close", async () => {
+    const { conn: p } = setup();
+    const conn = await p;
+    await expect(
+      conn.send({ type: "session.interrupt", requestId: "i", sessionId: "nope" }),
+    ).rejects.toThrow(/Unknown session/);
+    await conn.close();
+    await expect(open(conn, "x")).rejects.toThrow(/closed/);
+  });
+
+  it("closing an unknown session completes without touching the cluster", async () => {
+    const { kube, events, conn: p } = setup();
+    const conn = await p;
+    conn.onEvent((e) => events.push(e));
+    await conn.send({ type: "session.close", requestId: "c", sessionId: "ghost" });
+    expect(events).toEqual([{ type: "request.completed", requestId: "c" }]);
+    expect(kube.calls).toEqual([]);
+  });
+
+  it("reports a failed delete on close instead of throwing", async () => {
+    const { kube, events, conn: p } = setup();
+    const conn = await p;
+    conn.onEvent((e) => events.push(e));
+    await open(conn, "s");
+    kube.delete = async () => {
+      throw new Error("forbidden");
+    };
+    await conn.send({ type: "session.close", requestId: "c", sessionId: "s" });
+    expect(events.at(-1)).toMatchObject({ type: "request.failed", requestId: "c" });
+  });
+
+  it("cleans up when the agent rejects session.open", async () => {
+    const kube = new FakeKube();
+    const acp = new FakeAcp();
+    const events: ProviderEvent[] = [];
+    const failing = (c: Parameters<FakeAcp["provider"]>[0]) => {
+      const reg = acp.provider(c);
+      const connect = reg.connect.bind(reg);
+      reg.connect = async (r) => {
+        const inner = await connect(r);
+        inner.send = async () => {
+          throw new Error("agent crashed");
+        };
+        return inner;
+      };
+      return reg;
+    };
+    const conn = await connectKube(request, { config: ConfigSchema.parse({}), kube, acpProvider: failing, detectRepo: repo });
+    conn.onEvent((e) => events.push(e));
+    await open(conn, "s");
+    expect(events.at(-1)).toMatchObject({ type: "request.failed", error: { message: expect.stringContaining("agent crashed") } });
+    expect(acp.closed).toBe(true);
+    expect(kube.calls.at(-1)).toMatch(/^delete:sandbox\//);
+  });
+
+  it("fails fast on an unknown template without creating anything", async () => {
+    const { kube, events, conn: p } = setup();
+    const conn = await p;
+    conn.onEvent((e) => events.push(e));
+    await open(conn, "s", { PASEO_KUBE_TEMPLATE: "rust" });
+    expect(kube.applied).toHaveLength(0);
+    expect(events[0]).toMatchObject({ type: "request.failed", error: { message: expect.stringContaining("Known templates") } });
+  });
+
+  it("answers catalog and sessions requests locally", async () => {
+    const { kube, events, conn: p } = setup();
+    const conn = await p;
+    conn.onEvent((e) => events.push(e));
+    await conn.send({ type: "catalog", requestId: "k" });
+    await conn.send({ type: "sessions", requestId: "l" });
+    expect(events.map((e) => e.type)).toEqual(["catalog", "sessions"]);
+    expect(kube.calls).toEqual([]);
+  });
+
+  it("only advertises capabilities the caller offered", async () => {
+    const conn = await connectKube({ versions: [1], capabilities: ["permission", "session.list"] }, {
+      config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider,
+    });
+    expect(conn.capabilities).toEqual(["permission"]);
+    await expect(
+      connectKube({ versions: [2], capabilities: [] }, { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider }),
+    ).rejects.toThrow(/protocol/);
+  });
+});

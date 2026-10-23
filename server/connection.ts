@@ -125,8 +125,16 @@ export async function connectKube(
           await opening.get(input.sessionId);
           const session = sessions.get(input.sessionId);
           if (session) await session.inner.send(input).catch(() => undefined);
-          await release(input.sessionId);
-          emit({ type: "request.completed", requestId: input.requestId });
+          try {
+            await release(input.sessionId);
+            emit({ type: "request.completed", requestId: input.requestId });
+          } catch (error) {
+            emit({
+              type: "request.failed",
+              requestId: input.requestId,
+              error: { message: `kube-agents: failed to delete sandbox: ${(error as Error).message}` },
+            });
+          }
           return;
         }
         default: {
