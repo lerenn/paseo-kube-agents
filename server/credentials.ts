@@ -9,11 +9,16 @@ export function defaultStatePath(): string {
 }
 
 /**
- * Merge patch that sets one key of a Secret's `data` map (base64, as Secrets require). A merge patch
- * works when `data` is absent, which a JSON-patch `add /data/<key>` does not: the API server drops an empty `data`.
+ * Server-side-apply manifest that sets one key of a Secret's `data` map (base64, as Secrets require).
+ * `kubectl patch` cannot be used: it GETs the object first and the daemon has no `get` on the Secret.
  */
-export function secretPatch(key: CredentialKey, value: string): string {
-  return JSON.stringify({ data: { [key]: Buffer.from(value).toString("base64") } });
+export function secretApply(secret: string, namespace: string, key: CredentialKey, value: string): string {
+  return JSON.stringify({
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: { name: secret, namespace },
+    data: { [key]: Buffer.from(value).toString("base64") },
+  });
 }
 
 export function readStatus(path = defaultStatePath()): Record<string, boolean> {
@@ -39,7 +44,7 @@ export async function setCredential(
 ): Promise<Record<string, boolean>> {
   if (/[\r\n]/.test(value)) throw new Error("Credential values cannot contain newlines");
   try {
-    await kube.patchSecret(secret, secretPatch(key, value));
+    await kube.applySecretKey(secret, key, secretApply(secret, kube.namespace, key, value));
   } catch (error) {
     // never echo the value, even if kubectl does
     throw new Error((error as Error).message.split(value).join("***"));

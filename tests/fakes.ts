@@ -35,11 +35,12 @@ export class FakeKube implements Kube {
       writable: new WritableStream<AcpStreamMessage>(),
     };
   }
-  patches: { name: string; patch: string }[] = [];
+  namespace = "paseo-agents";
+  patches: { key: string; manifest: string }[] = [];
   patchError?: Error;
-  async patchSecret(name: string, patch: string) {
+  async applySecretKey(_secret: string, key: string, manifest: string) {
     if (this.patchError) throw this.patchError;
-    this.patches.push({ name, patch });
+    this.patches.push({ key, manifest });
   }
   async delete(kind: string, name: string) {
     this.calls.push(`delete:${kind}/${name}`);
