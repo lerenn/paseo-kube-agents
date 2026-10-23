@@ -182,6 +182,23 @@ describe("kube connection edge cases", () => {
     expect(kube.calls).toEqual([]);
   });
 
+  it("advertises tool policy support but does not forward the policy to the agent", async () => {
+    const { acp, conn: p } = setup();
+    const conn = await p;
+    expect(conn.capabilities).not.toContain("permission.tool_policy"); // request did not offer it
+    const offered = await connectKube(
+      { versions: [1], capabilities: ["permission", "permission.tool_policy"] },
+      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: acp.provider, detectRepo: repo },
+    );
+    expect(offered.capabilities).toContain("permission.tool_policy");
+    await offered.send({
+      type: "session.open", requestId: "r", sessionId: "s",
+      config: { ...sessionConfig(), toolPolicy: { preapproved: [{ kind: "mcp", server: "x", tool: "y" }] } },
+      history: "skip",
+    });
+    expect((acp.inputs[0] as any).config.toolPolicy).toBeUndefined();
+  });
+
   it("only advertises capabilities the caller offered", async () => {
     const conn = await connectKube({ versions: [1], capabilities: ["permission", "session.list"] }, {
       config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider,
