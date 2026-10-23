@@ -38,16 +38,14 @@ Paseo daemon                                   cluster (paseo-agents)
 
 ## Settings UI
 
-A sidebar item "Kube Agents" opens a screen (host-scoped plugin settings) with: namespace and default image
-(Cluster), an Advanced section (kubectl context, node selector, tolerated taint keys, agent command), a compact
-template list (default plus named ones; expand a row to edit its image, "Add template" adds one), and write-only
-credential fields. Sidebar position is controlled by the host (Settings > Sidebar lets the user reorder).
+A sidebar item "Kube Agents" opens a screen (host-scoped plugin settings) with: namespace and image
+(Cluster), an Advanced section (kubectl context, node selector, tolerated taint keys, agent command) and a
+collapsible Credentials section with write-only fields. Sidebar position is controlled by the host (Settings > Sidebar lets the user reorder).
 
-- **Templates**: one fat default image (`image/Dockerfile`: claude, codex, git, gh, node, python, build tools) plus
-  optional named templates. The only per-agent setting is env `PASEO_KUBE_TEMPLATE` (session env, then daemon env,
-  else `default`). An unknown name fails the session start and lists the known templates.
-- **Warm pools**: stored per template (off by default, size 1, idle timeout 900s) but hidden in the UI and not acted on yet; the
-  `SandboxClaim`/`SandboxWarmPool` path comes after the end-to-end run. Pods are rendered as `Sandbox` directly for now.
+- **One pod configuration**: namespace, image (`image/Dockerfile` is the fat default: claude, codex, git, gh, node,
+  python, build tools), placement and resources. Named templates and warm pools were removed for now; settings saved
+  with templates are migrated (the old `default` template's values become the flat settings). Pods are rendered as
+  `Sandbox` objects directly.
 - **Credentials**: password fields for `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`.
   Values are write-only: the plugin server-side-applies them into the Secret `paseo-agent-credentials` (value sent on stdin,
   not argv) and keeps only a local set / not set flag in `~/.paseo/kube-agents-credentials.json` (mode 0600).

@@ -14,9 +14,9 @@ import { CREDENTIAL_KEYS, type CredentialKey, credentialsSet, credentialsStatus 
 import { type KubeAgentsConfig, kubeSettings } from "../shared/settings.js";
 
 /** Optional host components; older apps may not provide them, so never render an undefined element. */
-const optionalUi = hostUi as Partial<{
+const optionalUi = hostUi as unknown as Partial<{
   ExternalLink: typeof hostUi.ExternalLink;
-  copyText: typeof hostUi.copyText;
+  copyText(text: string): Promise<void>;
 }>;
 
 function Link({ href, color, children }: { href: string; color: string; children: string }) {
@@ -257,53 +257,11 @@ function CredentialsSection({ theme }: { theme: PluginScreenProps["theme"] }) {
   );
 }
 
-const NEW_TEMPLATE = { warmPool: { enabled: false, size: 1, idleTimeoutSeconds: 900 } };
-
-function TemplateRow({
-  name,
-  values,
-  update,
-}: {
-  name: string;
-  values: KubeAgentsConfig;
-  update: (next: KubeAgentsConfig) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const template = values.templates[name] ?? NEW_TEMPLATE;
-  const setImage = (text: string) =>
-    update({
-      ...values,
-      templates: { ...values.templates, [name]: { ...template, image: text.trim() || undefined } },
-    });
-  const remove = () => {
-    const { [name]: _removed, ...rest } = values.templates;
-    update({ ...values, templates: rest });
-  };
-  return (
-    <>
-      <SettingsAction
-        label={name}
-        hint={template.image ?? "default image"}
-        actionLabel={open ? "Close" : "Edit"}
-        onPress={() => setOpen(!open)}
-      />
-      {open ? (
-        <>
-          <SettingsInput label="Image" hint="Empty uses the default image." initialValue={template.image ?? ""} onChangeText={setImage} />
-          {name !== "default" ? <SettingsAction label="Remove" actionLabel="Remove" onPress={remove} /> : null}
-        </>
-      ) : null}
-    </>
-  );
-}
-
 export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
   const settings = useSettings(kubeSettings);
   const [draft, setDraft] = useState<KubeAgentsConfig | null>(null);
   const [revision, setRevision] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
-  const [adding, setAdding] = useState(false);
-  const [newName, setNewName] = useState("");
 
   useEffect(() => {
     if (settings.status === "ready" && draft === null) {
@@ -325,16 +283,6 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
   if (!draft || !revision) return message("Loading...", theme.colors.foregroundMuted);
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings.values);
-  const names = ["default", ...Object.keys(draft.templates).filter((n) => n !== "default")];
-  const name = newName.trim().toLowerCase();
-  const nameValid = /^[a-z][a-z0-9-]*$/.test(name) && name !== "default" && !draft.templates[name];
-  const addTemplate = () => {
-    if (!nameValid) return;
-    setDraft({ ...draft, templates: { ...draft.templates, [name]: NEW_TEMPLATE } });
-    setNewName("");
-    setAdding(false);
-  };
-
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ padding: pad, gap: 16 }}>
       <Text style={{ color: theme.colors.foregroundMuted }}>Runs each agent that picks this provider in its own pod.</Text>
@@ -342,7 +290,7 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
       <SettingsSection title="Cluster">
         <SettingsCard>
           <SettingsInput label="Namespace" initialValue={draft.namespace} onChangeText={(namespace) => setDraft({ ...draft, namespace: namespace.trim() })} />
-          <SettingsInput label="Default image" initialValue={draft.defaultImage} onChangeText={(defaultImage) => setDraft({ ...draft, defaultImage: defaultImage.trim() })} />
+          <SettingsInput label="Image" initialValue={draft.image} onChangeText={(image) => setDraft({ ...draft, image: image.trim() })} />
           <SettingsAction label="Advanced" actionLabel={advanced ? "Hide" : "Show"} onPress={() => setAdvanced(!advanced)} />
           {advanced ? (
             <>
@@ -370,22 +318,6 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
               />
             </>
           ) : null}
-        </SettingsCard>
-      </SettingsSection>
-
-      <SettingsSection title="Templates" info="Pick one on an agent with PASEO_KUBE_TEMPLATE.">
-        <SettingsCard>
-          {names.map((n) => (
-            <TemplateRow key={n} name={n} values={draft} update={setDraft} />
-          ))}
-          {adding ? (
-            <>
-              <SettingsInput label="Name" hint="Lowercase letters, digits and dashes." placeholder="go" onChangeText={setNewName} />
-              <SettingsAction label="" actionLabel="Add" onPress={addTemplate} disabled={!nameValid} />
-            </>
-          ) : (
-            <SettingsAction label="Add template" actionLabel="Add" onPress={() => setAdding(true)} />
-          )}
         </SettingsCard>
       </SettingsSection>
 
