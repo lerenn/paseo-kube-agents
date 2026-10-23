@@ -1,13 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import { ConfigSchema } from "../server/config.js";
-import { connectKube } from "../server/connection.js";
+import { connectKube, isPreapproved } from "../server/connection.js";
 import { FakeAcp, FakeKube } from "./fakes.js";
 
 const request = { versions: [1], capabilities: ["prompt.message", "permission"] };
 const sessionConfig = (env: Record<string, string> = {}): ProviderSessionConfig => ({
   cwd: "/home/me/repo", env, mcpServers: {}, settings: {}, persist: false,
 });
+const flush = () => new Promise((r) => setTimeout(r, 0));
 const repo = async () => ({ url: "https://github.com/lerenn/x", branch: "main" });
 
 function setup(overrides: Partial<ReturnType<typeof ConfigSchema.parse>> = {}) {
@@ -67,6 +68,31 @@ describe("kube connection", () => {
     full.onEvent((e) => seen.push(e));
     await full.send({ type: "session.open", requestId: "r", sessionId: "s2", config: sessionConfig(), history: "skip" });
     expect((seen.find((e) => e.type === "session.opened") as any).capabilities).toEqual(["prompt.image"]);
+  });
+
+  it("answers permission requests for preapproved MCP tools without prompting, others reach Paseo", async () => {
+    const ask = (conn: Awaited<ReturnType<typeof connectKube>>, id: string) =>
+      conn.send({ type: "session.prompt", sessionId: id, prompt: { clientMessageId: "c", delivery: "auto", input: { type: "message", content: [{ type: "text", text: "ask" }] } } });
+    for (const [preapproved, expectPrompt] of [[true, false], [false, true]] as const) {
+      const { acp, events, conn: p } = setup();
+      const conn = await p;
+      conn.onEvent((e) => events.push(e));
+      const policy = preapproved ? { preapproved: [{ kind: "mcp" as const, server: "everything", tool: "echo" }] } : { preapproved: [{ kind: "mcp" as const, server: "other", tool: "echo" }] };
+      await conn.send({ type: "session.open", requestId: "r", sessionId: "s", config: { ...sessionConfig(), toolPolicy: policy }, history: "skip" });
+      await ask(conn, "s");
+      await flush();
+      expect(events.some((e) => e.type === "session.permission")).toBe(expectPrompt);
+      const answered = acp.inputs.find((i) => i.type === "session.permission") as any;
+      if (preapproved) expect(answered).toMatchObject({ permissionId: "permission:c1", response: { behavior: "allow", selectedActionId: "allow_once" } });
+      else expect(answered).toBeUndefined();
+    }
+  });
+
+  it("matches MCP tool names the way claude sanitizes server names", () => {
+    const policy = { preapproved: [{ kind: "mcp" as const, server: "my.server", tool: "do" }] };
+    expect(isPreapproved(policy, ["mcp__my_server__do"])).toBe(true);
+    expect(isPreapproved(policy, ["Bash"])).toBe(false);
+    expect(isPreapproved(undefined, ["mcp__my_server__do"])).toBe(false);
   });
 
   it("selects the pod template from PASEO_KUBE_TEMPLATE", async () => {

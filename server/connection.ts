@@ -4,6 +4,7 @@ import type {
   ProviderEvent,
   ProviderInput,
   ProviderRegistration,
+  ProviderToolPolicy,
 } from "@getpaseo/plugin/server/provider";
 import type { AcpConnector } from "@getpaseo/plugin/server/acp";
 import {
@@ -18,8 +19,8 @@ import { cloneIntoPod, detectRepo, parseClonePlan, podWorkdir, repoName, type Re
 
 const PROTOCOL_VERSION = 1;
 // `permission.tool_policy` is advertised because Paseo requires it whenever a plugin sets a tool policy
-// on a session. The ACP runtime inside cannot enforce preapprovals, so the policy is not forwarded:
-// preapproved tools still ask for permission, which errs on the side of more prompts, never fewer.
+// on a session. The ACP runtime inside cannot take the policy, so it is not forwarded; instead,
+// permission requests for preapproved MCP tools are answered here (see `isPreapproved`).
 const SUPPORTED_CAPABILITIES = [
   "prompt.message",
   "prompt.command",
@@ -44,6 +45,24 @@ interface PodSession {
   podCwd: string;
   inner: ProviderConnection;
   stopForwarding: () => void;
+}
+
+/** Claude names MCP tools `mcp__<server>__<tool>`, with non-alphanumerics in the server name as `_`. */
+const mcpToolName = (server: string, tool: string) =>
+  `mcp__${server.replace(/[^a-zA-Z0-9_-]/g, "_")}__${tool}`;
+
+export function isPreapproved(policy: ProviderToolPolicy | undefined, names: readonly (string | undefined)[]): boolean {
+  if (!policy) return false;
+  const allowed = new Set(
+    policy.preapproved.filter((p) => p.kind === "mcp").map((p) => mcpToolName(p.server, p.tool)),
+  );
+  return names.some((name) => name !== undefined && allowed.has(name));
+}
+
+/** Prefer a one-off allow, then any allow. Undefined when the agent offers no allow option. */
+function allowActionId(request: Extract<ProviderEvent, { type: "session.permission" }>["request"]): string | undefined {
+  const allows = (request.actions ?? []).filter((a) => a.behavior === "allow");
+  return (allows.find((a) => /once/i.test(a.id)) ?? allows[0])?.id;
 }
 
 /**
@@ -88,7 +107,26 @@ export async function connectKube(
         versions: request.versions,
         capabilities: request.capabilities,
       });
-      const stopForwarding = inner.onEvent((event) => emit(toLocal(event, sessionId, podCwd, session.cwd, capabilities)));
+      const policy = session.toolPolicy;
+      const stopForwarding = inner.onEvent((event) => {
+        // The ACP runtime cannot enforce Paseo's tool policy, so tools preapproved on the daemon are
+        // answered here instead of prompting inside the pod. Everything else reaches Paseo as usual.
+        if (event.type === "session.permission" && event.sessionId === sessionId) {
+          const actionId = allowActionId(event.request);
+          if (actionId && isPreapproved(policy, [event.request.name, event.request.title])) {
+            void inner!
+              .send({
+                type: "session.permission",
+                sessionId,
+                permissionId: event.request.id,
+                response: { behavior: "allow", selectedActionId: actionId },
+              })
+              .catch(() => emit(event));
+            return;
+          }
+        }
+        emit(toLocal(event, sessionId, podCwd, session.cwd, capabilities));
+      });
       sessions.set(sessionId, { sandbox: name, localCwd: session.cwd, podCwd, inner, stopForwarding });
       const { toolPolicy: _unenforceable, ...forwarded } = session;
       await inner.send({ ...input, config: { ...forwarded, cwd: podCwd } });

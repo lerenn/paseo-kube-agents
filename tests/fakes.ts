@@ -68,6 +68,23 @@ export class FakeAcp {
             this.emit({ type: "session.opened", sessionId: input.sessionId, capabilities: ["prompt.image", "session.persistence"], restoration: "core", cwd: input.config.cwd });
             this.emit({ type: "session.ready", sessionId: input.sessionId });
           }
+          if (input.type === "session.prompt" && (input.prompt.input as any).content?.[0]?.text === "ask") {
+            this.emit({
+              type: "session.permission",
+              sessionId: input.sessionId,
+              request: {
+                id: "permission:c1",
+                name: "mcp__everything__echo",
+                kind: "tool",
+                actions: [
+                  { id: "allow_always", label: "Always", behavior: "allow" },
+                  { id: "allow_once", label: "Once", behavior: "allow" },
+                  { id: "reject_once", label: "No", behavior: "deny" },
+                ],
+              },
+            });
+            return;
+          }
           if (input.type === "session.prompt") {
             this.emit({ type: "session.turn", sessionId: input.sessionId, turnId: "t1", state: "started" });
             this.emit({ type: "timeline.item", sessionId: input.sessionId, item: { id: "m1", type: "assistant_message", text: "hello from pod" } });
