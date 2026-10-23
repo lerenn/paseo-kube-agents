@@ -62,11 +62,11 @@ function Credential({ name }: { name: CredentialKey }) {
   const state = isSet === null ? "unknown" : isSet ? "set" : "not set";
   return (
     <>
-      <SettingsRow label={CREDENTIAL_LABELS[name]} hint={`Currently: ${state}. Write-only; the value is never shown.`} error={error}>
+      <SettingsRow label={CREDENTIAL_LABELS[name]} hint={`${state}. Write-only.`} error={error}>
         <SettingsInput
           key={`${name}-${isSet}`}
           secureTextEntry
-          placeholder={isSet ? "Enter a new value to replace" : "Enter value"}
+          placeholder={isSet ? "New value" : "Value"}
           onChangeText={setDraft}
           disabled={busy}
         />
@@ -76,51 +76,43 @@ function Credential({ name }: { name: CredentialKey }) {
   );
 }
 
-function Template({
+const NEW_TEMPLATE = { warmPool: { enabled: false, size: 1, idleTimeoutSeconds: 900 } };
+
+function TemplateRow({
   name,
   values,
   update,
-  remove,
 }: {
   name: string;
   values: KubeAgentsConfig;
   update: (next: KubeAgentsConfig) => void;
-  remove?: () => void;
 }) {
-  const template = values.templates[name] ?? { warmPool: { enabled: false, size: 1, idleTimeoutSeconds: 900 } };
-  const set = (patch: Partial<typeof template>) =>
-    update({ ...values, templates: { ...values.templates, [name]: { ...template, ...patch } } });
-  const pool = template.warmPool;
+  const [open, setOpen] = useState(false);
+  const template = values.templates[name] ?? NEW_TEMPLATE;
+  const setImage = (text: string) =>
+    update({
+      ...values,
+      templates: { ...values.templates, [name]: { ...template, image: text.trim() || undefined } },
+    });
+  const remove = () => {
+    const { [name]: _removed, ...rest } = values.templates;
+    update({ ...values, templates: rest });
+  };
   return (
-    <SettingsSection title={name === "default" ? "Template: default" : `Template: ${name}`}>
-      <SettingsCard>
-        <SettingsInput
-          label="Image"
-          hint={name === "default" ? "Falls back to the default image above." : "Empty uses the default image."}
-          initialValue={template.image ?? ""}
-          onChangeText={(text) => set({ image: text.trim() || undefined })}
-        />
-        <SettingsSwitch
-          label="Warm pool"
-          hint="Keep pre-started pods ready. Stored now; takes effect when warm pools ship."
-          value={pool.enabled}
-          onValueChange={(enabled) => set({ warmPool: { ...pool, enabled } })}
-        />
-        <SettingsInput
-          label="Pool size"
-          initialValue={String(pool.size)}
-          onChangeText={(t) => set({ warmPool: { ...pool, size: Math.min(20, Math.max(0, intOr(t, pool.size))) } })}
-          disabled={!pool.enabled}
-        />
-        <SettingsInput
-          label="Idle timeout (seconds)"
-          initialValue={String(pool.idleTimeoutSeconds)}
-          onChangeText={(t) => set({ warmPool: { ...pool, idleTimeoutSeconds: Math.max(60, intOr(t, pool.idleTimeoutSeconds)) } })}
-          disabled={!pool.enabled}
-        />
-        {remove ? <SettingsAction label="Remove template" actionLabel="Remove" onPress={remove} /> : null}
-      </SettingsCard>
-    </SettingsSection>
+    <>
+      <SettingsAction
+        label={name}
+        hint={template.image ?? "default image"}
+        actionLabel={open ? "Close" : "Edit"}
+        onPress={() => setOpen(!open)}
+      />
+      {open ? (
+        <>
+          <SettingsInput label="Image" hint="Empty uses the default image." initialValue={template.image ?? ""} onChangeText={setImage} />
+          {name !== "default" ? <SettingsAction label="Remove" actionLabel="Remove" onPress={remove} /> : null}
+        </>
+      ) : null}
+    </>
   );
 }
 
@@ -128,6 +120,8 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
   const settings = useSettings(kubeSettings);
   const [draft, setDraft] = useState<KubeAgentsConfig | null>(null);
   const [revision, setRevision] = useState<string | null>(null);
+  const [advanced, setAdvanced] = useState(false);
+  const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState("");
 
   useEffect(() => {
@@ -151,81 +145,66 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings.values);
   const names = ["default", ...Object.keys(draft.templates).filter((n) => n !== "default")];
+  const name = newName.trim().toLowerCase();
+  const nameValid = /^[a-z][a-z0-9-]*$/.test(name) && name !== "default" && !draft.templates[name];
   const addTemplate = () => {
-    const name = newName.trim().toLowerCase();
-    if (!/^[a-z][a-z0-9-]*$/.test(name) || draft.templates[name] || name === "default") return;
-    setDraft({ ...draft, templates: { ...draft.templates, [name]: { warmPool: { enabled: false, size: 1, idleTimeoutSeconds: 900 } } } });
+    if (!nameValid) return;
+    setDraft({ ...draft, templates: { ...draft.templates, [name]: NEW_TEMPLATE } });
     setNewName("");
+    setAdding(false);
   };
 
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ padding: pad, gap: 16 }}>
-      <Text style={{ color: theme.colors.foregroundMuted }}>
-        Each agent that selects the Kube agents provider runs in its own pod. Nothing runs until one does.
-      </Text>
+      <Text style={{ color: theme.colors.foregroundMuted }}>Runs each agent that picks this provider in its own pod.</Text>
 
       <SettingsSection title="Cluster">
         <SettingsCard>
           <SettingsInput label="Namespace" initialValue={draft.namespace} onChangeText={(namespace) => setDraft({ ...draft, namespace: namespace.trim() })} />
-          <SettingsInput label="kubectl context" hint="Empty uses the daemon's current context." initialValue={draft.context ?? ""} onChangeText={(t) => setDraft({ ...draft, context: t.trim() || undefined })} />
-          <SettingsInput
-            label="Node selector"
-            hint="label=value, comma separated. Applied to every pod without its own."
-            initialValue={Object.entries(draft.nodeSelector).map(([k, v]) => `${k}=${v}`).join(",")}
-            onChangeText={(t) => setDraft({ ...draft, nodeSelector: parseSelector(t) })}
-          />
-          <SettingsInput
-            label="Tolerated taint keys"
-            hint="Comma separated; each is tolerated with operator Exists."
-            initialValue={draft.tolerationKeys.join(",")}
-            onChangeText={(t) => setDraft({ ...draft, tolerationKeys: t.split(",").map((k) => k.trim()).filter(Boolean) })}
-          />
-          <SettingsInput
-            label="Agent command"
-            hint="Runs an ACP agent over stdio in the pod, space separated. Default: claude-agent-acp"
-            initialValue={draft.agentCommand.join(" ")}
-            onChangeText={(t) => {
-              const parts = t.split(/\s+/).filter(Boolean);
-              if (parts.length > 0) setDraft({ ...draft, agentCommand: parts });
-            }}
-          />
           <SettingsInput label="Default image" initialValue={draft.defaultImage} onChangeText={(defaultImage) => setDraft({ ...draft, defaultImage: defaultImage.trim() })} />
+          <SettingsAction label="Advanced" actionLabel={advanced ? "Hide" : "Show"} onPress={() => setAdvanced(!advanced)} />
+          {advanced ? (
+            <>
+              <SettingsInput label="kubectl context" hint="Empty uses the current context." initialValue={draft.context ?? ""} onChangeText={(t) => setDraft({ ...draft, context: t.trim() || undefined })} />
+              <SettingsInput
+                label="Node selector"
+                hint="label=value, comma separated."
+                initialValue={Object.entries(draft.nodeSelector).map(([k, v]) => `${k}=${v}`).join(",")}
+                onChangeText={(t) => setDraft({ ...draft, nodeSelector: parseSelector(t) })}
+              />
+              <SettingsInput
+                label="Tolerated taint keys"
+                hint="Comma separated."
+                initialValue={draft.tolerationKeys.join(",")}
+                onChangeText={(t) => setDraft({ ...draft, tolerationKeys: t.split(",").map((k) => k.trim()).filter(Boolean) })}
+              />
+              <SettingsInput
+                label="Agent command"
+                hint="ACP agent started in the pod."
+                initialValue={draft.agentCommand.join(" ")}
+                onChangeText={(t) => {
+                  const parts = t.split(/\s+/).filter(Boolean);
+                  if (parts.length > 0) setDraft({ ...draft, agentCommand: parts });
+                }}
+              />
+            </>
+          ) : null}
         </SettingsCard>
       </SettingsSection>
 
-      {names.map((name) => (
-        <Template
-          key={name}
-          name={name}
-          values={draft}
-          update={setDraft}
-          remove={name === "default" ? undefined : () => {
-            const { [name]: _removed, ...rest } = draft.templates;
-            setDraft({ ...draft, templates: rest });
-          }}
-        />
-      ))}
-
-      <SettingsSection title="Add template">
+      <SettingsSection title="Templates" info="Pick one on an agent with PASEO_KUBE_TEMPLATE.">
         <SettingsCard>
-          <SettingsInput label="Name" hint="Select it on an agent with PASEO_KUBE_TEMPLATE=<name>." placeholder="go" onChangeText={setNewName} />
-          <SettingsAction label="" actionLabel="Add" onPress={addTemplate} />
-        </SettingsCard>
-      </SettingsSection>
-
-      <SettingsSection title="Save">
-        <SettingsCard>
-          <SettingsAction
-            label={settings.saveError ? "Not saved" : dirty ? "Unsaved changes" : "Saved"}
-            hint={settings.saveError ?? undefined}
-            actionLabel={settings.saving ? "Saving..." : "Save settings"}
-            disabled={!dirty || settings.saving}
-            onPress={() => {
-              void settings.save(draft, revision).then((ok) => {
-                if (ok) setDraft(null);
-              });
-            }}
-          />
+          {names.map((n) => (
+            <TemplateRow key={n} name={n} values={draft} update={setDraft} />
+          ))}
+          {adding ? (
+            <>
+              <SettingsInput label="Name" hint="Lowercase letters, digits and dashes." placeholder="go" onChangeText={setNewName} />
+              <SettingsAction label="" actionLabel="Add" onPress={addTemplate} disabled={!nameValid} />
+            </>
+          ) : (
+            <SettingsAction label="Add template" actionLabel="Add" onPress={() => setAdding(true)} />
+          )}
         </SettingsCard>
       </SettingsSection>
 
@@ -236,6 +215,20 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
           ))}
         </SettingsCard>
       </SettingsSection>
+
+      <SettingsCard>
+        <SettingsAction
+          label={settings.saveError ? "Not saved" : dirty ? "Unsaved changes" : "Saved"}
+          hint={settings.saveError ?? undefined}
+          actionLabel={settings.saving ? "Saving..." : "Save"}
+          disabled={!dirty || settings.saving}
+          onPress={() => {
+            void settings.save(draft, revision).then((ok) => {
+              if (ok) setDraft(null);
+            });
+          }}
+        />
+      </SettingsCard>
     </ScrollView>
   );
 }
