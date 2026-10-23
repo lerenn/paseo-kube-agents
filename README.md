@@ -49,7 +49,7 @@ default image, the templates (default plus named ones) with an image and a warm 
 - **Warm pools**: stored per template (off by default, size 1, idle timeout 900s) but not acted on yet; the
   `SandboxClaim`/`SandboxWarmPool` path comes after the end-to-end run. Pods are rendered as `Sandbox` directly for now.
 - **Credentials**: password fields for `GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
-  Values are write-only: the plugin merge-patches them into the Secret `paseo-agent-credentials` (value sent on stdin,
+  Values are write-only: the plugin server-side-applies them into the Secret `paseo-agent-credentials` (value sent on stdin,
   not argv) and keeps only a local set / not set flag in `~/.paseo/kube-agents-credentials.json` (mode 0600).
   The daemon has no `get` on the Secret, so the flag reflects what this plugin wrote.
 - **Inert until selected**: registering the provider makes no cluster call; pods are created only when an agent is

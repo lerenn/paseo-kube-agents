@@ -2,30 +2,48 @@ import { mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { readStatus, secretPatch, setCredential } from "../server/credentials.js";
+import { readStatus, secretApply, setCredential } from "../server/credentials.js";
 import { FakeKube } from "./fakes.js";
 
 const statePath = () => join(mkdtempSync(join(tmpdir(), "kube-cred-")), "state.json");
 
 describe("credentials", () => {
-  it("builds a merge patch with a base64 value, valid when the Secret has no data yet", () => {
-    expect(JSON.parse(secretPatch("GH_TOKEN", "ghp_x"))).toEqual({
+  it("builds a server-side-apply manifest with a base64 value and no get needed", () => {
+    expect(JSON.parse(secretApply("paseo-agent-credentials", "paseo-agents", "GH_TOKEN", "ghp_x"))).toEqual({
+      apiVersion: "v1",
+      kind: "Secret",
+      metadata: { name: "paseo-agent-credentials", namespace: "paseo-agents" },
       data: { GH_TOKEN: Buffer.from("ghp_x").toString("base64") },
     });
   });
 
-  it("sends a merge patch on stdin, not argv", async () => {
-    const calls: string[][] = [];
+  it("applies server-side with a field manager per key, value on stdin only", async () => {
+    const calls: { args: string[]; stdin?: string }[] = [];
     const { Kubectl } = await import("../server/kube.js");
     class Spy extends Kubectl {
       async ok(args: string[], stdin?: string) {
-        calls.push([...args, stdin ?? ""]);
+        calls.push({ args, stdin });
         return { code: 0, stdout: "", stderr: "" };
       }
     }
-    await new Spy({ namespace: "paseo-agents" }).patchSecret("s", secretPatch("GH_TOKEN", "tok"));
-    expect(calls[0]!.slice(0, 5)).toEqual(["patch", "secret", "s", "--type=merge", "--patch-file=/dev/stdin"]);
-    expect(calls[0]!.slice(0, 5).join(" ")).not.toContain(Buffer.from("tok").toString("base64"));
+    const manifest = secretApply("s", "paseo-agents", "GH_TOKEN", "s3cr3t-v4lue");
+    await new Spy({ namespace: "paseo-agents" }).applySecretKey("s", "GH_TOKEN", manifest);
+    expect(calls[0]!.args).toEqual(["apply", "--server-side", "--field-manager=paseo-kube-agents-gh_token", "--force-conflicts", "-f", "-"]);
+    expect(calls[0]!.args.join(" ")).not.toContain("s3cr3t-v4lue");
+    expect(calls[0]!.stdin).toBe(manifest);
+  });
+
+  it("never uses kubectl patch (it GETs, and the daemon cannot get Secrets)", async () => {
+    const { Kubectl } = await import("../server/kube.js");
+    const seen: string[][] = [];
+    class Spy extends Kubectl {
+      async ok(args: string[]) {
+        seen.push(args);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    }
+    await new Spy({ namespace: "n" }).applySecretKey("s", "OPENAI_API_KEY", "{}");
+    expect(seen.flat()).not.toContain("patch");
   });
 
   it("starts with every key not set", () => {
@@ -38,7 +56,7 @@ describe("credentials", () => {
     const kube = new FakeKube();
     const path = statePath();
     const status = await setCredential(kube, "paseo-agent-credentials", "OPENAI_API_KEY", "sk-secret", path);
-    expect(kube.patches[0]!.name).toBe("paseo-agent-credentials");
+    expect(kube.patches[0]!.key).toBe("OPENAI_API_KEY");
     expect(status.OPENAI_API_KEY).toBe(true);
     expect(status.GH_TOKEN).toBe(false);
     expect(readFileSync(path, "utf8")).not.toContain("sk-secret");

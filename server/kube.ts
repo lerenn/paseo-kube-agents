@@ -15,8 +15,12 @@ export interface Kube {
   /** Long-lived stdio JSON-RPC (ndjson) stream to a process inside the pod. */
   execStream(pod: string, argv: string[]): AcpStream;
   delete(kind: string, name: string): Promise<void>;
-  /** Applies a merge patch to a Secret. The patch travels on stdin, never on argv. */
-  patchSecret(name: string, mergePatch: string): Promise<void>;
+  readonly namespace: string;
+  /**
+   * Server-side-applies one Secret key, with a field manager per key so writing one key never drops
+   * another. Needs only `patch` on the Secret. The manifest travels on stdin, never on argv.
+   */
+  applySecretKey(secret: string, key: string, manifest: string): Promise<void>;
 }
 
 export interface KubectlOptions {
@@ -82,10 +86,12 @@ export function ndjsonStream(
 }
 
 export class Kubectl implements Kube {
+  readonly namespace: string;
   private readonly binary: string;
   private readonly base: string[];
 
   constructor(options: KubectlOptions) {
+    this.namespace = options.namespace;
     this.binary = options.binary ?? "kubectl";
     this.base = [...(options.context ? ["--context", options.context] : []), "-n", options.namespace];
   }
@@ -117,8 +123,11 @@ export class Kubectl implements Kube {
     return ndjsonStream(child);
   }
 
-  async patchSecret(name: string, mergePatch: string): Promise<void> {
-    await this.ok(["patch", "secret", name, "--type=merge", "--patch-file=/dev/stdin"], mergePatch);
+  async applySecretKey(_secret: string, key: string, manifest: string): Promise<void> {
+    await this.ok(
+      ["apply", "--server-side", `--field-manager=paseo-kube-agents-${key.toLowerCase()}`, "--force-conflicts", "-f", "-"],
+      manifest,
+    );
   }
 
   async delete(kind: string, name: string): Promise<void> {
