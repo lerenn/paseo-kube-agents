@@ -16,7 +16,16 @@ import { buildSandbox, sandboxName } from "./sandbox.js";
 import { cloneIntoPod, detectRepo, podWorkdir, type RepoRef } from "./workspace.js";
 
 const PROTOCOL_VERSION = 1;
-const SUPPORTED_CAPABILITIES = ["prompt.message", "prompt.command", "session.configure", "permission"];
+// `permission.tool_policy` is advertised because Paseo requires it whenever a plugin sets a tool policy
+// on a session. The ACP runtime inside cannot enforce preapprovals, so the policy is not forwarded:
+// preapproved tools still ask for permission, which errs on the side of more prompts, never fewer.
+const SUPPORTED_CAPABILITIES = [
+  "prompt.message",
+  "prompt.command",
+  "session.configure",
+  "permission",
+  "permission.tool_policy",
+];
 
 export interface ConnectionDeps {
   config: KubeAgentsConfig;
@@ -78,7 +87,8 @@ export async function connectKube(
       });
       const stopForwarding = inner.onEvent((event) => emit(toLocal(event, sessionId, podCwd, session.cwd)));
       sessions.set(sessionId, { sandbox: name, localCwd: session.cwd, podCwd, inner, stopForwarding });
-      await inner.send({ ...input, config: { ...session, cwd: podCwd } });
+      const { toolPolicy: _unenforceable, ...forwarded } = session;
+      await inner.send({ ...input, config: { ...forwarded, cwd: podCwd } });
     } catch (error) {
       sessions.delete(sessionId);
       await inner?.close().catch(() => undefined);
