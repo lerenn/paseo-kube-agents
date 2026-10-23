@@ -71,11 +71,11 @@ export const parseSelector = (text: string): Record<string, string> =>
 
 const CREDENTIAL_HINTS: Record<CredentialKey, { text: string; link?: { href: string; label: string }; command?: string }> = {
   GH_TOKEN: {
-    text: "Fine-grained token on the repos agents work on. Permissions: Contents read/write, Pull requests read/write, Metadata read.",
+    text: "Fine-grained token. Needs Contents and Pull requests read/write, Metadata read.",
     link: { href: "https://github.com/settings/personal-access-tokens/new", label: "Create a token" },
   },
   CLAUDE_CODE_OAUTH_TOKEN: {
-    text: "Run this on your machine and paste the token:",
+    text: "Run on your machine, then paste the token:",
     command: "claude setup-token",
   },
   ANTHROPIC_API_KEY: {
@@ -145,31 +145,35 @@ function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenP
 
   const { colors } = theme;
   return (
-    <View style={{ padding: 12, gap: 8 }}>
+    <View style={{ paddingHorizontal: 14, paddingVertical: 12, gap: 6 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <StatusMark state={isSet} theme={theme} />
         <Text style={{ color: colors.foreground, flex: 1 }}>{CREDENTIAL_LABELS[name]}</Text>
       </View>
-      <View style={{ gap: 4 }}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 8, rowGap: 2, paddingLeft: 24 }}>
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{CREDENTIAL_HINTS[name].text}</Text>
         {CREDENTIAL_HINTS[name].command ? (
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-            <Text selectable style={{ color: colors.foreground, fontFamily: "monospace" }}>
-              {CREDENTIAL_HINTS[name].command}
-            </Text>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <View style={{ backgroundColor: colors.surface2, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2 }}>
+              <Text selectable style={{ color: colors.foreground, fontFamily: "monospace", fontSize: 12 }}>
+                {CREDENTIAL_HINTS[name].command}
+              </Text>
+            </View>
             {optionalUi.copyText ? (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel={`Copy ${CREDENTIAL_HINTS[name].command}`}
                 onPress={() => void optionalUi.copyText!(CREDENTIAL_HINTS[name].command!).catch(() => undefined)}
               >
-                <Text style={{ color: colors.accent }}>Copy</Text>
+                <Text style={{ color: colors.accent, fontSize: 12 }}>Copy</Text>
               </Pressable>
             ) : null}
           </View>
         ) : null}
         {CREDENTIAL_HINTS[name].link ? (
-          <Link href={CREDENTIAL_HINTS[name].link!.href} color={colors.accent}>{CREDENTIAL_HINTS[name].link!.label}</Link>
+          <Link href={CREDENTIAL_HINTS[name].link!.href} color={colors.accent}>
+            {CREDENTIAL_HINTS[name].link!.label}
+          </Link>
         ) : null}
       </View>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -185,12 +189,13 @@ function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenP
           accessibilityLabel={`${CREDENTIAL_LABELS[name]} value`}
           style={{
             flex: 1,
+            marginLeft: 24,
             color: colors.foreground,
             borderColor: colors.border,
             borderWidth: 1,
             borderRadius: 8,
             paddingHorizontal: 10,
-            paddingVertical: 6,
+            paddingVertical: 5,
           }}
         />
         {draft.length > 0 ? (
@@ -205,8 +210,8 @@ function Credential({ name, theme }: { name: CredentialKey; theme: PluginScreenP
           </Pressable>
         ) : null}
       </View>
-      {error ? <Text style={{ color: colors.statusDanger }}>{error}</Text> : null}
-      {statusError ? <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>Status unavailable, retrying: {statusError}</Text> : null}
+      {error ? <Text style={{ color: colors.statusDanger, paddingLeft: 24 }}>{error}</Text> : null}
+      {statusError ? <Text style={{ color: colors.foregroundMuted, fontSize: 12, paddingLeft: 24 }}>Status unavailable, retrying: {statusError}</Text> : null}
     </View>
   );
 }
