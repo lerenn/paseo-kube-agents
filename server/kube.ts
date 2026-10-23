@@ -1,6 +1,37 @@
 import { spawn } from "node:child_process";
 import type { AcpStream, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
 
+export interface PodInfo {
+  uid: string;
+  ready: boolean;
+  /** Being deleted: not usable even if it still reports Ready. */
+  terminating: boolean;
+  phase?: string;
+  /** Why the pod is not running yet, in a form fit to show a user (scheduling, volume, image pull). */
+  problem?: string;
+}
+
+export function parsePodInfo(pod: any): PodInfo {
+  const conditions: any[] = pod?.status?.conditions ?? [];
+  const cond = (type: string) => conditions.find((c) => c.type === type);
+  const unscheduled = cond("PodScheduled")?.status === "False" ? cond("PodScheduled") : undefined;
+  const waiting = (pod?.status?.containerStatuses ?? [])
+    .map((c: any) => c.state?.waiting)
+    .find((w: any) => w?.reason && w.reason !== "ContainerCreating" && w.reason !== "PodInitializing");
+  const problem = unscheduled
+    ? `Pod cannot be scheduled: ${unscheduled.message ?? unscheduled.reason}`
+    : waiting
+      ? `Container waiting: ${waiting.reason}${waiting.message ? ` (${waiting.message})` : ""}`
+      : undefined;
+  return {
+    uid: pod?.metadata?.uid ?? "",
+    ready: cond("Ready")?.status === "True",
+    terminating: Boolean(pod?.metadata?.deletionTimestamp),
+    phase: pod?.status?.phase,
+    ...(problem ? { problem } : {}),
+  };
+}
+
 export interface ExecResult {
   code: number;
   stdout: string;
@@ -10,7 +41,8 @@ export interface ExecResult {
 /** The only cluster surface kube-agents needs; tests substitute a fake. */
 export interface Kube {
   apply(manifest: Record<string, unknown>): Promise<void>;
-  waitReady(kind: string, name: string, timeoutSeconds: number): Promise<void>;
+  /** Current state of a pod, or null when it does not exist (yet). */
+  podInfo(name: string): Promise<PodInfo | null>;
   exec(pod: string, argv: string[]): Promise<ExecResult>;
   /** Long-lived stdio JSON-RPC (ndjson) stream to a process inside the pod. */
   execStream(pod: string, argv: string[]): AcpStream;
@@ -118,8 +150,9 @@ export class Kubectl implements Kube {
     await this.ok(["apply", "-f", "-"], JSON.stringify(manifest));
   }
 
-  async waitReady(kind: string, name: string, timeoutSeconds: number): Promise<void> {
-    await this.ok(["wait", "--for=condition=Ready", `${kind}/${name}`, `--timeout=${timeoutSeconds}s`]);
+  async podInfo(name: string): Promise<PodInfo | null> {
+    const result = await this.ok(["get", "pod", name, "--ignore-not-found", "-o", "json"]);
+    return result.stdout.trim() ? parsePodInfo(JSON.parse(result.stdout)) : null;
   }
 
   exec(pod: string, argv: string[]): Promise<ExecResult> {

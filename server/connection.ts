@@ -3,14 +3,16 @@ import type {
   ProviderConnectRequest,
   ProviderEvent,
   ProviderInput,
+  ProviderPersistence,
   ProviderRegistration,
   ProviderToolPolicy,
 } from "@getpaseo/plugin/server/provider";
 import type { AcpConnector } from "@getpaseo/plugin/server/acp";
 import type { KubeAgentsConfig } from "./config.js";
 import type { Kube } from "./kube.js";
-import { buildSandbox, sandboxName } from "./sandbox.js";
+import { buildSandbox, sandboxName, workspaceClaimName } from "./sandbox.js";
 import { REF_ENV_KEYS } from "../shared/pod-ref.js";
+import { waitPodReady } from "./pod-wait.js";
 import { cloneIntoPod, detectRepo, parseClonePlan, podWorkdir, repoName, type RepoRef } from "./workspace.js";
 
 const PROTOCOL_VERSION = 1;
@@ -33,15 +35,37 @@ export interface ConnectionDeps {
   acpProvider: (connector: AcpConnector) => ProviderRegistration;
   /** Resolves the repo to clone for a daemon-local cwd (injected for tests). */
   detectRepo?: (cwd: string) => Promise<RepoRef>;
+  /** Clock and sleep for pod polling (injected for tests). */
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 }
+
+type SessionConfig = Extract<ProviderInput, { type: "session.open" }>["config"];
 
 interface PodSession {
   sandbox: string;
   localCwd: string;
   podCwd: string;
+  /** The session config to reopen on a replacement pod: the daemon-side tool policy is never sent on. */
+  config: SessionConfig;
+  toolPolicy?: ProviderToolPolicy;
   inner: ProviderConnection;
   stopForwarding: () => void;
+  /** The agent's own session handle, so a replacement pod can resume the conversation. */
+  persistence?: ProviderPersistence;
+  turnId?: string;
+  /** False until Paseo's open request has completed; failures before that are not recoverable. */
+  opened: boolean;
+  recovering: boolean;
+  /** True while the agent session is being reopened on a replacement pod. */
+  reopening: boolean;
+  closing: boolean;
+  /** Timestamps of recent recoveries, to stop a crash loop. */
+  recoveries: number[];
 }
+
+const MAX_RECOVERIES = 3;
+const RECOVERY_WINDOW_MS = 10 * 60 * 1000;
 
 /** Claude names MCP tools `mcp__<server>__<tool>`, with non-alphanumerics in the server name as `_`. */
 const mcpToolName = (server: string, tool: string) =>
@@ -82,6 +106,123 @@ export async function connectKube(
   const emit = (event: ProviderEvent) => {
     for (const listener of listeners) listener(event);
   };
+  const wait = (name: string, onProblem?: (message: string) => void) =>
+    waitPodReady(kube, name, {
+      timeoutSeconds: config.readyTimeoutSeconds,
+      onProblem,
+      sleep: deps.sleep,
+      now: deps.now,
+    });
+  const notice = (sessionId: string, severity: "info" | "warning" | "error", title: string) =>
+    emit({ type: "session.notice", sessionId, notice: { id: "kube-pod", severity, title } });
+
+  /** Clones only when the workspace volume is empty, so a replacement pod keeps the agent's files. */
+  async function ensureClone(name: string, repo: RepoRef, podCwd: string, plan: ReturnType<typeof parseClonePlan>) {
+    const present = await kube.exec(name, ["test", "-d", `${podCwd}/.git`]);
+    if (present.code !== 0) await cloneIntoPod(kube, name, repo, podCwd, plan);
+  }
+
+  /** Starts the agent in the pod and wires its events to Paseo. */
+  async function startInner(sessionId: string, ps: PodSession): Promise<ProviderConnection> {
+    const connector: AcpConnector = () => kube.execStream(ps.sandbox, [...config.agentCommand]);
+    const inner = await deps.acpProvider(connector).connect({
+      versions: request.versions,
+      capabilities: request.capabilities,
+    });
+    ps.stopForwarding = inner.onEvent((event) => onInnerEvent(sessionId, ps, inner, event));
+    ps.inner = inner;
+    return inner;
+  }
+
+  function onInnerEvent(sessionId: string, ps: PodSession, inner: ProviderConnection, event: ProviderEvent) {
+    if (inner !== ps.inner) return;
+    if (event.type === "session.opened" && event.persistence) ps.persistence = event.persistence;
+    if (event.type === "session.persistence" && event.sessionId === sessionId) ps.persistence = event.persistence;
+    if (event.type === "session.turn" && event.sessionId === sessionId) {
+      ps.turnId = event.state === "started" ? event.turnId : undefined;
+    }
+    // A pod that went away takes the agent process with it; resume on the replacement instead of
+    // telling Paseo the session died.
+    if (event.type === "session.runtime_failed" && event.sessionId === sessionId && ps.opened && !ps.closing) {
+      void recover(sessionId, ps);
+      return;
+    }
+    // Reopening on a replacement pod is internal: Paseo already has this session open.
+    if ("requestId" in event && typeof event.requestId === "string" && event.requestId.startsWith("recover-")) return;
+    if (ps.reopening && (event.type === "session.opened" || event.type === "session.ready")) return;
+    // The ACP runtime cannot take Paseo's tool policy, so tools preapproved on the daemon are
+    // answered here instead of prompting inside the pod. Everything else reaches Paseo as usual.
+    if (event.type === "session.permission" && event.sessionId === sessionId) {
+      const actionId = allowActionId(event.request);
+      if (actionId && isPreapproved(ps.toolPolicy, [event.request.name, event.request.title])) {
+        void inner
+          .send({
+            type: "session.permission",
+            sessionId,
+            permissionId: event.request.id,
+            response: { behavior: "allow", selectedActionId: actionId },
+          })
+          .catch(() => emit(event));
+        return;
+      }
+    }
+    emit(toLocal(event, sessionId, ps.podCwd, ps.localCwd, capabilities));
+  }
+
+  async function recover(sessionId: string, ps: PodSession): Promise<void> {
+    if (ps.recovering || ps.closing || closed) return;
+    const clock = (deps.now ?? Date.now)();
+    ps.recoveries = ps.recoveries.filter((t) => clock - t < RECOVERY_WINDOW_MS);
+    if (ps.recoveries.length >= MAX_RECOVERIES) {
+      emit({
+        type: "session.runtime_failed",
+        sessionId,
+        error: { message: `kube-agents: the agent keeps failing in its pod (${MAX_RECOVERIES} restarts in 10 minutes)` },
+      });
+      return;
+    }
+    ps.recoveries.push(clock);
+    ps.recovering = true;
+    const lost = ps.inner;
+    ps.stopForwarding();
+    if (ps.turnId) {
+      emit({
+        type: "session.turn",
+        sessionId,
+        turnId: ps.turnId,
+        state: "failed",
+        error: { message: "The pod was lost during this turn; the agent restarted on a new pod." },
+      });
+      ps.turnId = undefined;
+    }
+    notice(sessionId, "warning", "Pod lost, waiting for a replacement");
+    try {
+      await lost.close().catch(() => undefined);
+      await wait(ps.sandbox, (problem) => notice(sessionId, "warning", problem));
+      const repo = await (deps.detectRepo ?? detectRepo)(ps.localCwd);
+      await ensureClone(ps.sandbox, repo, ps.podCwd, parseClonePlan(ps.config.env));
+      const inner = await startInner(sessionId, ps);
+      ps.reopening = true;
+      await inner.send({
+        type: "session.open",
+        requestId: `recover-${Date.now()}`,
+        sessionId,
+        config: ps.config,
+        history: "skip",
+        ...(ps.persistence ? { persistence: ps.persistence } : {}),
+      } as ProviderInput);
+      notice(sessionId, "info", "Reconnected on a new pod");
+    } catch (error) {
+      emit({
+        type: "session.runtime_failed",
+        sessionId,
+        error: { message: `kube-agents: could not recover the session: ${(error as Error).message}` },
+      });
+    } finally {
+      ps.reopening = false;
+      ps.recovering = false;
+    }
+  }
 
   async function open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     const { sessionId, config: session } = input;
@@ -89,56 +230,53 @@ export async function connectKube(
     const plan = parseClonePlan(session.env);
     const name = sandboxName(sessionId, repoName(repo.url), session.env[REF_ENV_KEYS.slug]);
     const podCwd = podWorkdir(name);
+    const { toolPolicy: _unenforceable, ...forwarded } = session;
 
     await kube.apply(buildSandbox({ name, sessionId, config }));
-    let inner: ProviderConnection | undefined;
+    const ps: PodSession = {
+      sandbox: name,
+      localCwd: session.cwd,
+      podCwd,
+      config: { ...forwarded, cwd: podCwd },
+      toolPolicy: session.toolPolicy,
+      inner: undefined as unknown as ProviderConnection,
+      stopForwarding: () => undefined,
+      opened: false,
+      recovering: false,
+      reopening: false,
+      closing: false,
+      recoveries: [],
+    };
     try {
-      await kube.waitReady("sandbox", name, config.readyTimeoutSeconds);
-      await cloneIntoPod(kube, name, repo, podCwd, plan);
-
-      const connector: AcpConnector = () => kube.execStream(name, [...config.agentCommand]);
-      inner = await deps.acpProvider(connector).connect({
-        versions: request.versions,
-        capabilities: request.capabilities,
-      });
-      const policy = session.toolPolicy;
-      const stopForwarding = inner.onEvent((event) => {
-        // The ACP runtime cannot enforce Paseo's tool policy, so tools preapproved on the daemon are
-        // answered here instead of prompting inside the pod. Everything else reaches Paseo as usual.
-        if (event.type === "session.permission" && event.sessionId === sessionId) {
-          const actionId = allowActionId(event.request);
-          if (actionId && isPreapproved(policy, [event.request.name, event.request.title])) {
-            void inner!
-              .send({
-                type: "session.permission",
-                sessionId,
-                permissionId: event.request.id,
-                response: { behavior: "allow", selectedActionId: actionId },
-              })
-              .catch(() => emit(event));
-            return;
-          }
-        }
-        emit(toLocal(event, sessionId, podCwd, session.cwd, capabilities));
-      });
-      sessions.set(sessionId, { sandbox: name, localCwd: session.cwd, podCwd, inner, stopForwarding });
-      const { toolPolicy: _unenforceable, ...forwarded } = session;
-      await inner.send({ ...input, config: { ...forwarded, cwd: podCwd } });
+      await wait(name);
+      await ensureClone(name, repo, podCwd, plan);
+      await startInner(sessionId, ps);
+      sessions.set(sessionId, ps);
+      await ps.inner.send({ ...input, config: { ...forwarded, cwd: podCwd } });
+      ps.opened = true;
     } catch (error) {
       sessions.delete(sessionId);
-      await inner?.close().catch(() => undefined);
-      await kube.delete("sandbox", name).catch(() => undefined);
+      ps.stopForwarding();
+      await ps.inner?.close().catch(() => undefined);
+      await deleteSandbox(name).catch(() => undefined);
       throw error;
     }
+  }
+
+  /** Deleting the Sandbox cascades to the pod and its claim; the claim is also deleted explicitly. */
+  async function deleteSandbox(name: string): Promise<void> {
+    await kube.delete("sandbox", name);
+    await kube.delete("pvc", workspaceClaimName(name)).catch(() => undefined);
   }
 
   async function release(sessionId: string): Promise<void> {
     const session = sessions.get(sessionId);
     if (!session) return;
+    session.closing = true;
     sessions.delete(sessionId);
     session.stopForwarding();
     await session.inner.close().catch(() => undefined);
-    await kube.delete("sandbox", session.sandbox);
+    await deleteSandbox(session.sandbox);
   }
 
   return {
@@ -177,7 +315,10 @@ export async function connectKube(
         case "session.close": {
           await opening.get(input.sessionId);
           const session = sessions.get(input.sessionId);
-          if (session) await session.inner.send(input).catch(() => undefined);
+          if (session) {
+            session.closing = true;
+            await session.inner.send(input).catch(() => undefined);
+          }
           try {
             await release(input.sessionId);
             emit({ type: "request.completed", requestId: input.requestId });
@@ -195,6 +336,7 @@ export async function connectKube(
           await opening.get(input.sessionId);
           const session = sessions.get(input.sessionId);
           if (!session) throw new Error(`Unknown session ${input.sessionId}`);
+          if (session.recovering) throw new Error("The pod is being replaced; try again once it has reconnected");
           await session.inner.send(input);
         }
       }

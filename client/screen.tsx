@@ -5,6 +5,7 @@ import {
   SettingsAction,
   SettingsCard,
   SettingsInput,
+  SettingsSelect,
   SettingsSection,
   SettingsSwitch,
 } from "@getpaseo/plugin/client/ui";
@@ -307,6 +308,36 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
                 initialValue={draft.tolerationKeys.join(",")}
                 onChangeText={(t) => setDraft({ ...draft, tolerationKeys: t.split(",").map((k) => k.trim()).filter(Boolean) })}
               />
+              <SettingsSelect
+                label="Workspace storage"
+                hint="Persistent keeps the clone across pod restarts."
+                value={draft.storage.mode}
+                options={[
+                  { label: "Persistent", value: "persistent" },
+                  { label: "Ephemeral", value: "ephemeral" },
+                ]}
+                onValueChange={(mode) => setDraft({ ...draft, storage: { ...draft.storage, mode } })}
+              />
+              {draft.storage.mode === "persistent" ? (
+                <>
+                  <SettingsInput
+                    label="Storage size"
+                    hint="A Kubernetes quantity, e.g. 10Gi."
+                    initialValue={draft.storage.size}
+                    onChangeText={(t) => {
+                      if (/^[1-9][0-9]*(\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)?$/.test(t.trim())) {
+                        setDraft({ ...draft, storage: { ...draft.storage, size: t.trim() } });
+                      }
+                    }}
+                  />
+                  <SettingsInput
+                    label="Storage class"
+                    hint="Empty uses the cluster's default."
+                    initialValue={draft.storage.storageClassName ?? ""}
+                    onChangeText={(t) => setDraft({ ...draft, storage: { ...draft.storage, storageClassName: t.trim() || undefined } })}
+                  />
+                </>
+              ) : null}
               <SettingsInput
                 label="Agent command"
                 hint="ACP agent started in the pod."
