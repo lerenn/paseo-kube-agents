@@ -52,6 +52,23 @@ describe("kube connection", () => {
     expect(events.at(-1)).toEqual({ type: "request.completed", requestId: "r2" });
   });
 
+  it("clips the session's capabilities to the ones the connection advertised", async () => {
+    const { events, conn: p } = setup();
+    const conn = await p;
+    conn.onEvent((e) => events.push(e));
+    await conn.send({ type: "session.open", requestId: "r", sessionId: "s", config: sessionConfig(), history: "skip" });
+    const opened = events.find((e) => e.type === "session.opened") as any;
+    expect(opened.capabilities).toEqual([]); // setup() offers neither prompt.image nor session.persistence
+    const full = await connectKube(
+      { versions: [1], capabilities: ["prompt.image", "session.persistence"] },
+      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider, detectRepo: repo },
+    );
+    const seen: ProviderEvent[] = [];
+    full.onEvent((e) => seen.push(e));
+    await full.send({ type: "session.open", requestId: "r", sessionId: "s2", config: sessionConfig(), history: "skip" });
+    expect((seen.find((e) => e.type === "session.opened") as any).capabilities).toEqual(["prompt.image"]);
+  });
+
   it("selects the pod template from PASEO_KUBE_TEMPLATE", async () => {
     const { kube, conn: p } = setup();
     const conn = await p;

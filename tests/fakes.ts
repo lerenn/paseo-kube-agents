@@ -65,7 +65,7 @@ export class FakeAcp {
         send: async (input) => {
           this.inputs.push(input);
           if (input.type === "session.open") {
-            this.emit({ type: "session.opened", sessionId: input.sessionId, capabilities: [], restoration: "core", cwd: input.config.cwd });
+            this.emit({ type: "session.opened", sessionId: input.sessionId, capabilities: ["prompt.image", "session.persistence"], restoration: "core", cwd: input.config.cwd });
             this.emit({ type: "session.ready", sessionId: input.sessionId });
           }
           if (input.type === "session.prompt") {
