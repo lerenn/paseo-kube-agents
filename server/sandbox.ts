@@ -58,8 +58,15 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
               image: config.image,
               command: ["sh", "-c", `mkdir -p "${HOME_DIR}" && exec sleep infinity`],
               workingDir: WORKSPACE_ROOT,
-              env: [{ name: "HOME", value: HOME_DIR }],
-              envFrom: [{ secretRef: { name: config.credentialsSecret, optional: true } }],
+              // Only the Claude token reaches the pod. No `envFrom`: a stale key in the Secret (an old
+              // GH_TOKEN, say) must never become a credential in the pod; GitHub goes through the daemon.
+              env: [
+                { name: "HOME", value: HOME_DIR },
+                {
+                  name: "CLAUDE_CODE_OAUTH_TOKEN",
+                  valueFrom: { secretKeyRef: { name: config.credentialsSecret, key: "CLAUDE_CODE_OAUTH_TOKEN", optional: true } },
+                },
+              ],
               ...(config.resources ? { resources: config.resources } : {}),
               volumeMounts: [{ name: WORKSPACE_VOLUME, mountPath: WORKSPACE_ROOT }],
             },

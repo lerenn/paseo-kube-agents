@@ -38,7 +38,7 @@ describe("workspace storage manifest", () => {
 
   it("keeps HOME on the volume so the agent's session state survives a pod restart", () => {
     const c = manifest().spec.podTemplate.spec.containers[0];
-    expect(c.env).toEqual([{ name: "HOME", value: "/workspace/.home" }]);
+    expect(c.env[0]).toEqual({ name: "HOME", value: "/workspace/.home" });
     expect(c.command.join(" ")).toContain("mkdir -p");
   });
 

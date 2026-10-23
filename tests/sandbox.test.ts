@@ -19,11 +19,15 @@ describe("sandbox manifest", () => {
     expect(Date.parse(sb.spec.shutdownTime)).toBeGreaterThan(Date.now());
   });
 
-  it("injects credentials from a Secret, never inline", () => {
+  it("injects only the Claude token, by reference to the Secret, never inline and never the whole Secret", () => {
     const sb = buildSandbox({ name: "n", sessionId: "s", config }) as any;
     const c = sb.spec.podTemplate.spec.containers[0];
-    expect(c.envFrom[0].secretRef.name).toBe("paseo-agent-credentials");
-    expect(c.env).toEqual([{ name: "HOME", value: "/workspace/.home" }]); // no credential values inline
+    expect(c.envFrom).toBeUndefined();
+    expect(c.env).toEqual([
+      { name: "HOME", value: "/workspace/.home" },
+      { name: "CLAUDE_CODE_OAUTH_TOKEN", valueFrom: { secretKeyRef: { name: "paseo-agent-credentials", key: "CLAUDE_CODE_OAUTH_TOKEN", optional: true } } },
+    ]);
+    expect(JSON.stringify(sb)).not.toMatch(/GH_TOKEN|GITHUB_TOKEN/);
   });
 
   it("applies the node selector and tolerations", () => {

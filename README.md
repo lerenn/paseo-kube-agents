@@ -12,10 +12,10 @@ Status: proof of concept, one agent per pod, developed against a fake cluster. N
 Paseo daemon                                   cluster (paseo-agents)
 ┌──────────────────────────────┐               ┌───────────────────────────────┐
 │ provider "kube-agents"       │  kubectl apply│ Sandbox pka-<session>-<rand>  │
-│  connectKube()               │──────────────▶│  └ pod (default/go/node image)│
-│   session.open               │  kubectl exec │      git clone <repo>@<branch>│
+│  connectKube()               │──────────────▶│  └ pod + RWO volume           │
+│   session.open               │  kubectl exec │      workspace from a bundle  │
 │   ├ apply Sandbox, wait Ready│──────────────▶│      claude-agent-acp  (ACP)  │
-│   ├ git clone in pod         │◀── ndjson ───▶│                               │
+│   ├ bundle the ref, seed pod │◀── ndjson ───▶│      bridge: push, tunnels    │
 │   └ SDK ACP runtime ◀────────┤   over stdio  └───────────────────────────────┘
 │  session.close → delete      │
 └──────────────────────────────┘
@@ -27,13 +27,23 @@ Paseo daemon                                   cluster (paseo-agents)
   `session.turn`, permissions) the built-in providers emit. agent-sandbox ships the same pattern in `examples/agentclientprotocol`.
   The SDK connector takes no arguments and is also used for capability probes, so kube-agents owns
   the pod lifecycle itself (`server/connection.ts`) and hands the SDK a connector bound to the session's pod.
-- **Workspace**: the daemon reads `origin` and the current branch of the session's `cwd`, and the pod runs
-  `git clone --branch <b>`. The agent sees committed and pushed state only; local uncommitted changes
-  do not travel. Paseo is told the session cwd is still the daemon-local path.
-- **Credentials**: never in images or manifests. Pods mount the Secret `paseo-agent-credentials` with
-  `envFrom` (`GH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`). Clones use `GH_TOKEN` via a git credential helper
-  (ssh remotes are rewritten to https). Pods have no ServiceAccount token, run non-root, and have a hard
-  `lifecycle.shutdownTime` (default 8h) as a backstop for leaked pods.
+- **Workspace**: seeded from the project's checkout on the daemon (below). Paseo is told the session cwd is still the daemon-local path.
+- **No GitHub access in the pod**: nothing is cloned from GitHub there and no GitHub token is a credential of the pod.
+  - *Seeding*: the daemon bundles the chosen ref from the project's own checkout (`git bundle`; fetching it first if the
+    daemon lacks it; a branch, a branch-off base or a pull request head) and streams it into the pod over `pods/exec`
+    stdin. The pod builds its workspace from the bundle, so unpushed local commits come along.
+  - *Pushing*: `git push` in the pod goes to a local "outbox" repo whose `pre-receive` hook asks the plugin, over a
+    bridge on the same `kubectl exec` channel, to push the new commits from the daemon with the daemon's own git
+    credentials. The agent sees an ordinary git result, including the remote's rejection. Only branch pushes are
+    accepted (no deletes, tags or other refs).
+  - *`gh` and GitHub tools*: pod agents are opted in to the GitHub Proxy plugin (`PASEO_GITHUB_PROXY=on`). Any loopback
+    URL in the agent's MCP config (`http://127.0.0.1:<port>`: GitHub Proxy, MCP Proxy, Agents Inbox, Leases, ...) is
+    tunnelled by port over the same channel, byte for byte, so URLs and bearer headers stay unchanged and streaming
+    works. Only the ports the session's config names are reachable, only on the daemon's loopback. Without the GitHub
+    Proxy plugin, `gh` explains that no GitHub access is configured. Plugins stay independent: nothing is imported.
+- **Credentials**: only `CLAUDE_CODE_OAUTH_TOKEN`, read from the Secret `paseo-agent-credentials` by reference
+  (never inline, never the whole Secret). Pods have no ServiceAccount token, run non-root, and have a hard
+  `shutdownTime` (default 8h) as a backstop for leaked pods.
 - **Storage and restarts**: `/workspace` (the clone, plus `HOME` so the agent's session state) is a plain
   ReadWriteOnce PVC from the Sandbox's `volumeClaimTemplates` (default 10Gi, default StorageClass; settable, or
   `ephemeral` for an emptyDir). When the pod is lost (eviction, node loss, delete) the Sandbox controller
@@ -52,7 +62,7 @@ collapsible Credentials section with write-only fields. Sidebar position is cont
   python, build tools), placement and resources. Named templates and warm pools were removed for now; settings saved
   with templates are migrated (the old `default` template's values become the flat settings). Pods are rendered as
   `Sandbox` objects directly.
-- **Credentials**: password fields for `GH_TOKEN` and `CLAUDE_CODE_OAUTH_TOKEN`.
+- **Credentials**: a write-only field for `CLAUDE_CODE_OAUTH_TOKEN`.
   Values are write-only: the plugin server-side-applies them into the Secret `paseo-agent-credentials` (value sent on stdin,
   not argv) and keeps only a local set / not set flag in `~/.paseo/kube-agents-credentials.json` (mode 0600).
   The daemon has no `get` on the Secret, so the flag reflects what this plugin wrote.
