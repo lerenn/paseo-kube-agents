@@ -13,7 +13,10 @@ describe("sandbox manifest", () => {
     expect(sb.metadata.namespace).toBe("paseo-agents");
     expect(sb.spec.podTemplate.spec.containers[0].image).toBe("go:1");
     expect(sb.spec.podTemplate.spec.nodeSelector).toEqual({ pool: "burst" });
-    expect(sb.spec.lifecycle.shutdownPolicy).toBe("Delete");
+    // v1beta1 has flat shutdown fields; there is no spec.lifecycle
+    expect(sb.spec.lifecycle).toBeUndefined();
+    expect(sb.spec.shutdownPolicy).toBe("Delete");
+    expect(Date.parse(sb.spec.shutdownTime)).toBeGreaterThan(Date.now());
   });
 
   it("injects credentials from a Secret, never inline", () => {
