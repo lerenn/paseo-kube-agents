@@ -7,13 +7,19 @@ import type {
   ProviderRegistration,
   ProviderToolPolicy,
 } from "@getpaseo/plugin/server/provider";
+import type { Readable } from "node:stream";
 import type { AcpConnector } from "@getpaseo/plugin/server/acp";
 import type { KubeAgentsConfig } from "./config.js";
 import type { Kube } from "./kube.js";
 import { buildSandbox, sandboxName, workspaceClaimName } from "./sandbox.js";
 import { REF_ENV_KEYS } from "../shared/pod-ref.js";
+import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
+import { type GitRunner, runGit } from "./git.js";
+import { LAUNCH_SCRIPT } from "./pod-assets.js";
+import { installAssets, seedWorkspace } from "./pod-setup.js";
 import { waitPodReady } from "./pod-wait.js";
-import { cloneIntoPod, detectRepo, parseClonePlan, podWorkdir, repoName, type RepoRef } from "./workspace.js";
+import { createSeed, releaseSeed, seedBundle, type Seed } from "./seed.js";
+import { detectRepo, parseClonePlan, podWorkdir, repoName, type ClonePlan, type RepoRef } from "./workspace.js";
 
 const PROTOCOL_VERSION = 1;
 // `permission.tool_policy` is advertised because Paseo requires it whenever a plugin sets a tool policy
@@ -35,9 +41,23 @@ export interface ConnectionDeps {
   acpProvider: (connector: AcpConnector) => ProviderRegistration;
   /** Resolves the repo to clone for a daemon-local cwd (injected for tests). */
   detectRepo?: (cwd: string) => Promise<RepoRef>;
+  /** Pod port to daemon port for loopback tunnels (identity in production; tests share one host). */
+  mapTunnelPort?: (port: number) => number;
+  /** Git on the daemon, with the daemon's own credentials (injected for tests). */
+  git?: GitRunner;
+  /** Builds the seed bundle from the daemon's checkout (injected for tests). */
+  seeder?: (cwd: string, plan: ClonePlan | null, currentBranch: string) => Promise<SeedBundle>;
   /** Clock and sleep for pod polling (injected for tests). */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
+}
+
+export interface SeedBundle {
+  seed: Seed;
+  bundle: Readable;
+  /** Resolves when the bundle has been fully produced. */
+  done: Promise<void>;
+  release(): Promise<void>;
 }
 
 type SessionConfig = Extract<ProviderInput, { type: "session.open" }>["config"];
@@ -49,6 +69,7 @@ interface PodSession {
   /** The config Paseo opened the session with, to reopen it on a replacement pod. */
   config: SessionConfig;
   inner: ProviderConnection;
+  bridge?: RunningBridge;
   stopForwarding: () => void;
   /** The agent's own session handle, so a replacement pod can resume the conversation. */
   persistence?: ProviderPersistence;
@@ -115,15 +136,57 @@ export async function connectKube(
   const notice = (sessionId: string, severity: "info" | "warning" | "error", title: string) =>
     emit({ type: "session.notice", sessionId, notice: { id: "kube-pod", severity, title } });
 
-  /** Clones only when the workspace volume is empty, so a replacement pod keeps the agent's files. */
-  async function ensureClone(name: string, repo: RepoRef, podCwd: string, plan: ReturnType<typeof parseClonePlan>) {
-    const present = await kube.exec(name, ["test", "-d", `${podCwd}/.git`]);
-    if (present.code !== 0) await cloneIntoPod(kube, name, repo, podCwd, plan);
+  const git: GitRunner = deps.git ?? runGit;
+  const seeder =
+    deps.seeder ??
+    (async (cwd: string, plan: ClonePlan | null, currentBranch: string): Promise<SeedBundle> => {
+      const seed = await createSeed(git, cwd, plan, currentBranch);
+      const { stream, done } = seedBundle(cwd, seed);
+      return { seed, bundle: stream, done, release: () => releaseSeed(git, cwd, seed) };
+    });
+
+  async function identity(cwd: string) {
+    const read = async (key: string, fallback: string) => {
+      const r = await git(["config", key], { cwd }).catch(() => null);
+      return r && r.code === 0 && r.stdout.trim() ? r.stdout.trim() : fallback;
+    };
+    return { name: await read("user.name", "Paseo Agent"), email: await read("user.email", "agent@paseo.invalid") };
+  }
+
+  /**
+   * Prepares the pod: scripts and shims (always, they are cheap and idempotent), then the workspace
+   * built from a bundle of the daemon's checkout, but only when the volume is empty, so a
+   * replacement pod keeps the agent's files. Nothing is cloned from GitHub in the pod.
+   */
+  async function ensureWorkspace(ps: PodSession, repo: RepoRef, plan: ClonePlan | null): Promise<void> {
+    await installAssets(kube, ps.sandbox, ps.config.env);
+    const present = await kube.exec(ps.sandbox, ["test", "-d", `${ps.podCwd}/.git`]);
+    if (present.code === 0) return;
+    const made = await seeder(ps.localCwd, plan, repo.branch);
+    try {
+      await seedWorkspace(kube, ps.sandbox, made.seed, made.bundle, {
+        dir: ps.podCwd,
+        originUrl: repo.url,
+        identity: await identity(ps.localCwd),
+        newBranch: plan?.action === "branch-off" && plan.slug ? plan.slug : undefined,
+      });
+      await made.done;
+    } finally {
+      await made.release().catch(() => undefined);
+    }
+  }
+
+  function startPodBridge(ps: PodSession): void {
+    ps.bridge?.close();
+    // Every loopback URL in the agent's MCP config (and the GitHub proxy's) is tunnelled by port.
+    const ports = loopbackPorts(ps.config.mcpServers as Record<string, { type: string; url?: string }>, [ps.config.env.PASEO_GITHUB_PROXY_URL]);
+    ps.bridge = startBridge(kube, ps.sandbox, ports, { handle: (request) => applyPush(git, ps.localCwd, request) }, { mapPort: deps.mapTunnelPort });
   }
 
   /** Starts the agent in the pod and wires its events to Paseo. */
   async function startInner(sessionId: string, ps: PodSession): Promise<ProviderConnection> {
-    const connector: AcpConnector = () => kube.execStream(ps.sandbox, [...config.agentCommand]);
+    const connector: AcpConnector = () =>
+      kube.execStream(ps.sandbox, ["sh", "-c", LAUNCH_SCRIPT, "sh", ...config.agentCommand]);
     const inner = await deps.acpProvider(connector).connect({
       versions: request.versions,
       capabilities: request.capabilities,
@@ -184,6 +247,7 @@ export async function connectKube(
     ps.recovering = true;
     const lost = ps.inner;
     ps.stopForwarding();
+    ps.bridge?.close();
     if (ps.turnId) {
       emit({
         type: "session.turn",
@@ -199,7 +263,8 @@ export async function connectKube(
       await lost.close().catch(() => undefined);
       await wait(ps.sandbox, (problem) => notice(sessionId, "warning", problem));
       const repo = await (deps.detectRepo ?? detectRepo)(ps.localCwd);
-      await ensureClone(ps.sandbox, repo, ps.podCwd, parseClonePlan(ps.config.env));
+      await ensureWorkspace(ps, repo, parseClonePlan(ps.config.env));
+      startPodBridge(ps);
       const inner = await startInner(sessionId, ps);
       ps.reopening = true;
       await inner.send({
@@ -247,7 +312,8 @@ export async function connectKube(
     };
     try {
       await wait(name);
-      await ensureClone(name, repo, podCwd, plan);
+      await ensureWorkspace(ps, repo, plan);
+      startPodBridge(ps);
       await startInner(sessionId, ps);
       sessions.set(sessionId, ps);
       await ps.inner.send({ ...input, config: { ...forwarded, cwd: podCwd } });
@@ -255,6 +321,7 @@ export async function connectKube(
     } catch (error) {
       sessions.delete(sessionId);
       ps.stopForwarding();
+      ps.bridge?.close();
       await ps.inner?.close().catch(() => undefined);
       await deleteSandbox(name).catch(() => undefined);
       throw error;
@@ -273,6 +340,7 @@ export async function connectKube(
     session.closing = true;
     sessions.delete(sessionId);
     session.stopForwarding();
+    session.bridge?.close();
     await session.inner.close().catch(() => undefined);
     await deleteSandbox(session.sandbox);
   }

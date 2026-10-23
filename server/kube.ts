@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import type { Readable } from "node:stream";
 import type { AcpStream, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
 
 export interface PodInfo {
@@ -44,6 +45,8 @@ export interface Kube {
   /** Current state of a pod, or null when it does not exist (yet). */
   podInfo(name: string): Promise<PodInfo | null>;
   exec(pod: string, argv: string[]): Promise<ExecResult>;
+  /** Runs a command in the pod with `input` on its stdin (used to copy files in over the Kubernetes API). */
+  execInput(pod: string, argv: string[], input: Readable): Promise<ExecResult>;
   /** Long-lived stdio JSON-RPC (ndjson) stream to a process inside the pod. */
   execStream(pod: string, argv: string[]): AcpStream;
   delete(kind: string, name: string): Promise<void>;
@@ -157,6 +160,21 @@ export class Kubectl implements Kube {
 
   exec(pod: string, argv: string[]): Promise<ExecResult> {
     return run(this.binary, [...this.base, "exec", pod, "--", ...argv]);
+  }
+
+  execInput(pod: string, argv: string[], input: Readable): Promise<ExecResult> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(this.binary, [...this.base, "exec", "-i", pod, "--", ...argv], { stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => (stdout += d));
+      child.stderr.on("data", (d) => (stderr += d));
+      child.on("error", reject);
+      child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+      child.stdin.on("error", () => undefined);
+      input.on("error", reject);
+      input.pipe(child.stdin);
+    });
   }
 
   execStream(pod: string, argv: string[]): AcpStream {

@@ -32,7 +32,15 @@ export class FakeKube implements Kube {
     this.calls.push("exec");
     this.execs.push({ pod, argv });
     if (argv[0] === "test") return { code: this.hasClone ? 0 : 1, stdout: "", stderr: "" };
-    if (this.execResult.code === 0 && argv[0] === "sh" && argv[2]?.includes("clone")) this.hasClone = true;
+    if (this.execResult.code === 0 && argv[0] === "sh" && argv[2]?.includes("git init")) this.hasClone = true;
+    return this.execResult;
+  }
+  inputs: { pod: string; argv: string[]; bytes: number }[] = [];
+  async execInput(pod: string, argv: string[], input: import("node:stream").Readable) {
+    let bytes = 0;
+    for await (const chunk of input) bytes += (chunk as Buffer).length;
+    this.calls.push("execInput");
+    this.inputs.push({ pod, argv, bytes });
     return this.execResult;
   }
   execStream(pod: string, argv: string[]) {
@@ -115,3 +123,14 @@ export class FakeAcp {
     for (const l of this.listeners) l(event);
   }
 }
+
+import { Readable } from "node:stream";
+import type { SeedBundle } from "../server/connection.js";
+
+/** Stands in for the daemon-side seed bundle so tests need no git checkout. */
+export const fakeSeeder = async (_cwd: string, plan: { branch?: string } | null, currentBranch: string): Promise<SeedBundle> => ({
+  seed: { id: "seed1", ref: "refs/kube-seed/seed1", sha: "a".repeat(40), branch: plan?.branch ?? currentBranch },
+  bundle: Readable.from([Buffer.from("bundle")]),
+  done: Promise.resolve(),
+  release: async () => undefined,
+});

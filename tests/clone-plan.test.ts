@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { refEnv } from "../shared/pod-ref.js";
 import { sandboxName } from "../server/sandbox.js";
-import { cloneIntoPod, parseClonePlan, repoName, shortBranch } from "../server/workspace.js";
-import { FakeKube } from "./fakes.js";
-
-const repo = { url: "https://github.com/lerenn/x.git", branch: "dev" };
+import { parseClonePlan, repoName, shortBranch } from "../server/workspace.js";
 
 describe("clone plan", () => {
   it("round-trips the branch picker choice through env", () => {
@@ -20,41 +17,6 @@ describe("clone plan", () => {
     expect(shortBranch("refs/heads/main")).toBe("main");
     expect(shortBranch("refs/remotes/origin/feat/x")).toBe("feat/x");
     expect(shortBranch("origin/main")).toBe("main");
-  });
-
-  it("without a plan clones the checkout's current branch", async () => {
-    const kube = new FakeKube();
-    await cloneIntoPod(kube, "p", repo, "/workspace/p");
-    expect(kube.execs).toHaveLength(1);
-    expect(kube.execs[0]!.argv.slice(-3)).toEqual(["dev", repo.url, "/workspace/p"]);
-  });
-
-  it("branch-off clones the base then creates the slug branch", async () => {
-    const kube = new FakeKube();
-    await cloneIntoPod(kube, "p", repo, "/workspace/p", { action: "branch-off", branch: "main", slug: "brave-otter-12" });
-    expect(kube.execs[0]!.argv.slice(-3)).toEqual(["main", repo.url, "/workspace/p"]);
-    expect(kube.execs[1]!.argv.slice(-2)).toEqual(["/workspace/p", "brave-otter-12"]);
-    expect(kube.execs[1]!.argv[2]).toContain("checkout -b");
-  });
-
-  it("checkout of a branch clones that branch only", async () => {
-    const kube = new FakeKube();
-    await cloneIntoPod(kube, "p", repo, "/workspace/p", { action: "checkout", branch: "feat/x" });
-    expect(kube.execs).toHaveLength(1);
-    expect(kube.execs[0]!.argv.slice(-3)).toEqual(["feat/x", repo.url, "/workspace/p"]);
-  });
-
-  it("checkout of a pull request fetches its head", async () => {
-    const kube = new FakeKube();
-    await cloneIntoPod(kube, "p", repo, "/workspace/p", { action: "checkout", pullRequest: 42 });
-    expect(kube.execs[1]!.argv.slice(-2)).toEqual(["/workspace/p", "42"]);
-    expect(kube.execs[1]!.argv[2]).toContain("pull/$2/head");
-  });
-
-  it("reports which step failed", async () => {
-    const kube = new FakeKube();
-    kube.execResult = { code: 1, stdout: "", stderr: "nope" };
-    await expect(cloneIntoPod(kube, "p", repo, "/w", { action: "checkout", pullRequest: 1 })).rejects.toThrow(/git clone.*nope/);
   });
 
   it("names pods from the repository and slug, DNS-safe and short", () => {

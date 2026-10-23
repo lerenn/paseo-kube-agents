@@ -5,7 +5,7 @@ import { connectKube } from "../server/connection.js";
 import { parsePodInfo } from "../server/kube.js";
 import { waitPodReady } from "../server/pod-wait.js";
 import { buildSandbox, workspaceClaimName } from "../server/sandbox.js";
-import { FakeAcp, FakeKube } from "./fakes.js";
+import { FakeAcp, FakeKube, fakeSeeder } from "./fakes.js";
 
 const manifest = (storage?: object) => {
   const config = ConfigSchema.parse(storage ? { storage } : {});
@@ -107,7 +107,7 @@ describe("pod loss recovery", () => {
     let t = 0;
     const conn = await connectKube(
       { versions: [1], capabilities: ["prompt.message"] },
-      { config: ConfigSchema.parse(storage ? { storage } : {}), kube, acpProvider: acp.provider, detectRepo: repo, sleep: async () => undefined, now: () => (t += 1000) },
+      { config: ConfigSchema.parse(storage ? { storage } : {}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: () => (t += 1000) },
     );
     conn.onEvent((e) => events.push(e));
     await conn.send({ type: "session.open", requestId: "r1", sessionId: "s1", config: cfg(), history: "skip" });
