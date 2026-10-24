@@ -356,7 +356,10 @@ export async function connectKube(
     if (!persistent || limit <= 0) return;
     for (const [sessionId, ps] of sessions) {
       const idle = !ps.turnId && ps.pendingPermissions === 0 && ps.opened && now() - ps.lastActivity >= limit;
-      if (ps.state === "running" && idle) await suspend(sessionId, ps);
+      if (ps.state === "running" && idle) {
+        console.log(`[kube-agents] suspending idle pod ${ps.sandbox} (idle ${Math.round((now() - ps.lastActivity) / 1000)}s)`);
+        await suspend(sessionId, ps);
+      }
     }
   }
   const stopTicker = (deps.ticker ?? ((fn, ms) => {
