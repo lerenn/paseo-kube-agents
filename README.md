@@ -44,14 +44,27 @@ Paseo daemon                                   cluster (paseo-agents)
 - **Credentials**: only `CLAUDE_CODE_OAUTH_TOKEN`, read from the Secret `paseo-agent-credentials` by reference
   (never inline, never the whole Secret). Pods have no ServiceAccount token, run non-root, and have a hard
   `shutdownTime` (default 8h) as a backstop for leaked pods.
+- **Opening a session is free**: Paseo opens many sessions that never run (drafts, feature previews, every agent
+  again after a daemon restart). The plugin answers the open from the provider catalog and creates the pod (or
+  resumes the suspended one) only when the first message arrives. Paseo is given a stable handle minted here; the
+  agent process's own session handle stays on the Sandbox, and the reopen waits until that session is really open
+  before delivering anything.
+- **Orphans**: every Sandbox and volume claim is labelled with the owning daemon id (`paseo.sh/daemon`, from
+  `~/.paseo/server-id`) and the Paseo agent id (`paseo.sh/agent`). A reconciler runs at plugin start and every 10
+  minutes, asks Paseo (`paseo agent inspect`) about each labelled agent, and deletes the Sandbox and claim of any
+  agent that no longer exists or is archived (grace 5 minutes, every deletion logged). It never lists another
+  daemon's resources; resources without a daemon label (made before labelling) are swept only when they match no
+  live agent and are 15 minutes old (setting "Remove unlabelled leftovers", on by default, turn it off where daemons
+  share a namespace). An agent in use has no expiry: its storage goes only on archive, or here. The screen shows
+  "Last reconcile: N orphans removed".
 - **Idle suspension**: an agent idle (no turn running, nothing waiting on a permission) for `podIdleMinutes`
   (default 30, 0 = never) has its pod deleted with the Sandbox's `operatingMode: Suspended`; its volume, and the
   agent's saved session handle, stay. Any input (a prompt, a steer from another plugin or agent) recreates the pod on
   the same volume with the current image and settings, reopens the session from its handle, and then delivers the
   message; inputs that arrive meanwhile queue behind the resume. If the pod cannot be scheduled (the volume is bound
   to a zone with no capacity), the screen and the agent show why, the sandbox is released again, and the next input
-  retries. Suspended sandboxes live 14 days. Closing the plugin suspends pods instead of deleting them; the agent's
-  sandbox is found again by a per-session label when Paseo reopens the session. Only archiving deletes the volume.
+  retries. Closing the plugin suspends pods instead of deleting them; the agent's
+  sandbox is found again by a per-session label when Paseo reopens the session. Only archiving (or the reconciler, for a gone agent) deletes the volume.
 - **Warm pool** (off by default): `warmPool.size` pre-started Sandboxes (same image, settings and volume as a real
   agent) so a new agent skips scheduling and volume binding. A new pod agent claims a ready one (relabelled to its
   session) and is then seeded, tunnelled and credentialed as usual; the pool refills behind it. Pods built for old
