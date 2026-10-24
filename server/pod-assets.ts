@@ -147,13 +147,21 @@ if (!url || !capability) {
   }
   const out = await res.json();
   let stdout = out.stdout;
-  if (out.jq && out.code === 0) {
-    const r = spawnSync("jq", ["-r", out.jq], { input: stdout, encoding: "utf8" });
-    if (!r.error) stdout = r.stdout;
+  let code = out.code ?? 0;
+  if (out.jq && code === 0) {
+    const r = spawnSync("jq", ["-r", out.jq], { input: stdout, encoding: "utf8", maxBuffer: 1 << 28 });
+    if (r.error) {
+      process.stderr.write("gh: --jq needs the jq command on PATH (" + r.error.message + ")\n");
+      process.exit(1);
+    }
+    stdout = r.stdout;
+    if (r.stderr) process.stderr.write(r.stderr);
+    if (r.status) code = r.status;
   }
-  if (stdout) process.stdout.write(stdout);
+  // Exit from the write callback: process.exit() right after a write to a pipe drops what the pipe has not taken yet
+  // (about 64KB), which cut large responses short.
   if (out.stderr) process.stderr.write(out.stderr);
-  process.exit(out.code ?? 0);
+  process.stdout.write(stdout || "", () => process.exit(code));
 })();
 `;
 
