@@ -4,6 +4,9 @@ import { ConfigSchema, kubeSettings } from "./shared/settings.js";
 import { readStatus, removeCredential, setCredential } from "./server/credentials.js";
 import { Kubectl } from "./server/kube.js";
 import { createProvider } from "./server/provider.js";
+import { WarmPool } from "./server/pool.js";
+import { PodRegistry } from "./server/registry.js";
+import { kubeStatus } from "./shared/status.js";
 
 export default function contribute(server: PluginServerContext) {
   const settings = server.registerSettings(kubeSettings);
@@ -13,7 +16,17 @@ export default function contribute(server: PluginServerContext) {
     return ConfigSchema.parse(state.values);
   };
 
-  server.registerProvider(createProvider(getConfig));
+  const registry = new PodRegistry();
+  const pool = new WarmPool({
+    getConfig,
+    kubeFor: (c) => new Kubectl({ context: c.context, namespace: c.namespace }),
+  });
+  pool.start();
+  server.registerProvider(createProvider(getConfig, { pool, registry }));
+  server.handle(kubeStatus, async () => ({
+    pool: await pool.status(),
+    pods: registry.list().map((p) => ({ sessionId: p.sessionId, sandbox: p.sandbox, state: p.state, since: new Date(p.since).toISOString() })),
+  }));
   server.handle(credentialsStatus, () => ({ set: readStatus() }));
   server.handle(credentialsSet, async ({ key, value }) => {
     const config = await getConfig();
@@ -25,5 +38,5 @@ export default function contribute(server: PluginServerContext) {
     const kube = new Kubectl({ context: config.context, namespace: config.namespace });
     return { set: await removeCredential(kube, config.credentialsSecret, key) };
   });
-  return () => {};
+  return () => pool.stop();
 }

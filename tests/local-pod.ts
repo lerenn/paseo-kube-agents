@@ -39,6 +39,10 @@ export class LocalPodKube implements Kube {
   }
   async applySecretKey() {}
   async removeSecretKey() {}
+  async patchSandbox() {}
+  async listSandboxes() {
+    return [];
+  }
   readonly namespace = "local";
 
   /** Runs a command in the pod; resolves with its output whatever the exit code. */

@@ -13,6 +13,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Linking, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { CREDENTIAL_KEYS, type CredentialKey, credentialsRemove, credentialsSet, credentialsStatus } from "../shared/credentials.js";
 import { type KubeAgentsConfig, kubeSettings } from "../shared/settings.js";
+import { kubeStatus } from "../shared/status.js";
 
 /** Optional host components; older apps may not provide them, so never render an undefined element. */
 const optionalUi = hostUi as unknown as Partial<{
@@ -207,6 +208,62 @@ function Credential({
   );
 }
 
+function ago(iso: string): string {
+  const minutes = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} d ago`;
+}
+
+/** Warm pool state and the pod agents this plugin runs (running or suspended). Refreshes while visible. */
+function StatusSection({ theme }: { theme: PluginScreenProps["theme"] }) {
+  const load = useRpc(kubeStatus);
+  const [status, setStatus] = useState<Awaited<ReturnType<typeof load>> | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = () =>
+      load({}).then(
+        (s) => !cancelled && (setStatus(s), setError(null)),
+        (e: Error) => !cancelled && setError(e.message),
+      );
+    void refresh();
+    const timer = setInterval(refresh, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const { colors } = theme;
+  const line = (text: string, muted = false) => (
+    <Text key={text} style={{ color: muted ? colors.foregroundMuted : colors.foreground, fontSize: 13 }}>
+      {text}
+    </Text>
+  );
+  const pool = status?.pool;
+  const poolLine = !pool
+    ? "Loading..."
+    : pool.state === "off"
+      ? "Warm pool: off"
+      : pool.state === "asleep"
+        ? `Warm pool: asleep since ${ago(pool.asleepSince ?? new Date().toISOString())} (the next pod agent wakes it)`
+        : `Warm pool: active, ${pool.ready}/${pool.size} ready${pool.starting ? `, ${pool.starting} starting` : ""}`;
+  return (
+    <SettingsSection title="Status">
+      <SettingsCard>
+        <View style={{ paddingHorizontal: 14, paddingVertical: 12, gap: 4 }}>
+          {line(poolLine)}
+          {(status?.pods ?? []).map((p) => line(`${p.sandbox}: ${p.state} since ${ago(p.since)}`, true))}
+          {status && status.pods.length === 0 ? line("No pod agents running.", true) : null}
+          {error ? line(`Status unavailable: ${error}`, true) : null}
+        </View>
+      </SettingsCard>
+    </SettingsSection>
+  );
+}
+
 function CredentialsSection({ theme }: { theme: PluginScreenProps["theme"] }) {
   const status = useRpc(credentialsStatus);
   const [open, setOpen] = useState(false);
@@ -357,6 +414,42 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
                 </>
               ) : null}
               <SettingsInput
+                label="Suspend idle pods after (minutes)"
+                hint="Deletes an idle agent's pod and keeps its workspace; any message resumes it. 0 = never."
+                initialValue={String(draft.podIdleMinutes)}
+                onChangeText={(t) => {
+                  const n = Number.parseInt(t, 10);
+                  if (Number.isFinite(n) && n >= 0) setDraft({ ...draft, podIdleMinutes: n });
+                }}
+              />
+              <SettingsSwitch
+                label="Warm pool"
+                hint="Keep pre-started pods ready for new agents."
+                value={draft.warmPool.enabled}
+                onValueChange={(enabled) => setDraft({ ...draft, warmPool: { ...draft.warmPool, enabled } })}
+              />
+              {draft.warmPool.enabled ? (
+                <>
+                  <SettingsInput
+                    label="Warm pool size"
+                    initialValue={String(draft.warmPool.size)}
+                    onChangeText={(t) => {
+                      const n = Number.parseInt(t, 10);
+                      if (Number.isFinite(n) && n >= 0 && n <= 10) setDraft({ ...draft, warmPool: { ...draft.warmPool, size: n } });
+                    }}
+                  />
+                  <SettingsInput
+                    label="Warm pool sleeps after (minutes)"
+                    hint="No pod agent requested for this long: the pool scales to 0."
+                    initialValue={String(draft.warmPool.idleMinutes)}
+                    onChangeText={(t) => {
+                      const n = Number.parseInt(t, 10);
+                      if (Number.isFinite(n) && n >= 1) setDraft({ ...draft, warmPool: { ...draft.warmPool, idleMinutes: n } });
+                    }}
+                  />
+                </>
+              ) : null}
+              <SettingsInput
                 label="Agent command"
                 hint="ACP agent started in the pod."
                 initialValue={draft.agentCommand.join(" ")}
@@ -369,6 +462,8 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
           ) : null}
         </SettingsCard>
       </SettingsSection>
+
+      <StatusSection theme={theme} />
 
       <CredentialsSection theme={theme} />
 

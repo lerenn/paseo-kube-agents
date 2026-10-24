@@ -14,6 +14,14 @@ export const StorageSchema = z.object({
   storageClassName: z.string().optional(),
 });
 
+/** Pre-started pods so a new agent does not wait for scheduling. Off by default. */
+export const WarmPoolSchema = z.object({
+  enabled: z.boolean().default(false),
+  size: z.number().int().min(0).max(10).default(1),
+  /** No pod agent requested for this long: the pool scales to 0 so burst nodes can go. The next request wakes it. */
+  idleMinutes: z.number().int().min(1).default(60),
+});
+
 export const ConfigSchema = z.object({
   /** kubectl context. Unset uses the current context of the daemon's kubeconfig. */
   context: z.string().optional(),
@@ -40,6 +48,9 @@ export const ConfigSchema = z.object({
   /** Taint keys every pod tolerates (operator Exists). */
   tolerationKeys: z.array(z.string()).default([]),
   storage: StorageSchema.default({ mode: "persistent", size: "10Gi" }),
+  warmPool: WarmPoolSchema.default({ enabled: false, size: 1, idleMinutes: 60 }),
+  /** An agent idle this long has its pod deleted (the volume stays); any input brings it back. 0 = never. */
+  podIdleMinutes: z.number().int().min(0).default(30),
 });
 
 export type KubeAgentsConfig = z.infer<typeof ConfigSchema>;

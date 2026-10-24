@@ -136,8 +136,19 @@ describe("kube connection", () => {
     expect(kube.calls.some((c) => c.startsWith("delete:sandbox/"))).toBe(true);
   });
 
-  it("deletes every pod when the connection closes", async () => {
+  it("suspends every pod, keeping the volumes, when the connection closes (it is not an archive)", async () => {
     const { kube, conn: p } = setup();
+    const conn = await p;
+    for (const id of ["a", "b"]) {
+      await conn.send({ type: "session.open", requestId: id, sessionId: id, config: sessionConfig(), history: "skip" });
+    }
+    await conn.close();
+    expect(kube.calls.filter((c) => c.startsWith("delete:"))).toHaveLength(0);
+    expect(kube.patches2.filter((x) => x.patch.spec.operatingMode === "Suspended")).toHaveLength(2);
+  });
+
+  it("deletes every pod when the connection closes and the workspace is ephemeral", async () => {
+    const { kube, conn: p } = setup({ storage: { mode: "ephemeral", size: "10Gi" } });
     const conn = await p;
     for (const id of ["a", "b"]) {
       await conn.send({ type: "session.open", requestId: id, sessionId: id, config: sessionConfig(), history: "skip" });
@@ -145,6 +156,7 @@ describe("kube connection", () => {
     await conn.close();
     expect(kube.calls.filter((c) => c.startsWith("delete:sandbox/"))).toHaveLength(2);
   });
+
 });
 
 describe("kube connection edge cases", () => {
