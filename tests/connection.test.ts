@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import { ConfigSchema } from "../server/config.js";
 import { connectKube, isPreapproved } from "../server/connection.js";
+import { FALLBACK_CATALOG } from "../server/catalog.js";
 import { FakeAcp, FakeKube, fakeSeeder } from "./fakes.js";
 
 const request = { versions: [1], capabilities: ["prompt.message", "permission"] };
@@ -21,7 +22,7 @@ function setup(overrides: Partial<ReturnType<typeof ConfigSchema.parse>> = {}) {
   const acp = new FakeAcp();
   const config = ConfigSchema.parse({ image: "go:1", ...overrides });
   const events: ProviderEvent[] = [];
-  const conn = connectKube(request, { config, kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: fakeClock() });
+  const conn = connectKube(request, { config, kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, catalog: async () => FALLBACK_CATALOG, sleep: async () => undefined, now: fakeClock() });
   return { kube, acp, events, conn };
 }
 
@@ -75,7 +76,7 @@ describe("kube connection", () => {
     expect(opened.capabilities).toEqual([]); // setup() offers neither prompt.image nor session.persistence
     const full = await connectKube(
       { versions: [1], capabilities: ["prompt.image", "session.persistence"] },
-      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider, detectRepo: repo, seeder: fakeSeeder },
+      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider, detectRepo: repo, seeder: fakeSeeder, catalog: async () => FALLBACK_CATALOG },
     );
     const seen: ProviderEvent[] = [];
     full.onEvent((e) => seen.push(e));
@@ -211,7 +212,7 @@ describe("kube connection edge cases", () => {
       };
       return reg;
     };
-    const conn = await connectKube(request, { config: ConfigSchema.parse({}), kube, acpProvider: failing, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: fakeClock() });
+    const conn = await connectKube(request, { config: ConfigSchema.parse({}), kube, acpProvider: failing, detectRepo: repo, seeder: fakeSeeder, catalog: async () => FALLBACK_CATALOG, sleep: async () => undefined, now: fakeClock() });
     conn.onEvent((e) => events.push(e));
     await open(conn, "s");
     expect(events.at(-1)).toMatchObject({ type: "request.failed", error: { message: expect.stringContaining("agent crashed") } });
@@ -245,7 +246,7 @@ describe("kube connection edge cases", () => {
     expect(conn.capabilities).not.toContain("permission.tool_policy"); // request did not offer it
     const offered = await connectKube(
       { versions: [1], capabilities: ["permission", "permission.tool_policy"] },
-      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder },
+      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, catalog: async () => FALLBACK_CATALOG },
     );
     expect(offered.capabilities).toContain("permission.tool_policy");
     await offered.send({
@@ -264,5 +265,27 @@ describe("kube connection edge cases", () => {
     await expect(
       connectKube({ versions: [2], capabilities: [] }, { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider }),
     ).rejects.toThrow(/protocol/);
+  });
+});
+
+describe("duplicated settings", () => {
+  it("hides the adapter's own mode/model/thinking settings, which Paseo already shows as pickers", async () => {
+    const { acp, events, conn: p } = setup();
+    const conn = await p;
+    conn.onEvent((e) => events.push(e));
+    await conn.send({ type: "session.open", requestId: "r", sessionId: "s1", config: sessionConfig(), history: "skip" });
+    acp.emit({
+      type: "session.config",
+      sessionId: "s1",
+      config: {
+        models: [], modes: [], thinkingOptions: [],
+        settings: [
+          { type: "select", id: "mode", label: "Mode", value: "bypassPermissions", options: [{ label: "Bypass", value: "bypassPermissions" }] },
+          { type: "toggle", id: "fast", label: "Fast", value: true },
+        ],
+      },
+    });
+    const config = events.find((e) => e.type === "session.config") as any;
+    expect(config.config.settings.map((s: any) => s.id)).toEqual(["fast"]);
   });
 });

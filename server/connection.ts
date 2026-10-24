@@ -1,5 +1,6 @@
 import type {
   ProviderConnection,
+  ProviderCatalog,
   ProviderConnectRequest,
   ProviderEvent,
   ProviderInput,
@@ -13,6 +14,7 @@ import type { KubeAgentsConfig } from "./config.js";
 import type { Kube } from "./kube.js";
 import { buildSandbox, sandboxName, workspaceClaimName } from "./sandbox.js";
 import { REF_ENV_KEYS } from "../shared/pod-ref.js";
+import { createCatalogSource } from "./catalog.js";
 import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
 import { type GitRunner, runGit } from "./git.js";
 import { LAUNCH_SCRIPT } from "./pod-assets.js";
@@ -22,13 +24,12 @@ import { createSeed, releaseSeed, seedBundle, type Seed } from "./seed.js";
 import { detectRepo, parseClonePlan, podWorkdir, repoName, type ClonePlan, type RepoRef } from "./workspace.js";
 
 const PROTOCOL_VERSION = 1;
-export const AGENT_MODES = [
-  { id: "default", label: "Always ask" },
-  { id: "acceptEdits", label: "Accept file edits" },
-  { id: "plan", label: "Plan" },
-  { id: "auto", label: "Auto" },
-  { id: "bypassPermissions", label: "Bypass permissions" },
-];
+const defaultCatalog = createCatalogSource();
+/**
+ * The adapter also reports its mode, model and thinking level as generic settings. Paseo already has
+ * pickers for those (from the catalog and `session.configure`), so showing them again duplicates them.
+ */
+const DUPLICATED_SETTING_IDS = new Set(["mode", "model", "thinking", "thought_level", "effort"]);
 // `permission.tool_policy` is advertised because Paseo requires it whenever a plugin sets a tool policy
 // on a session. The ACP runtime inside cannot take the policy, so it is not forwarded; instead,
 // permission requests for preapproved MCP tools are answered here (see `isPreapproved`).
@@ -50,6 +51,8 @@ export interface ConnectionDeps {
   detectRepo?: (cwd: string) => Promise<RepoRef>;
   /** Pod port to daemon port for loopback tunnels (identity in production; tests share one host). */
   mapTunnelPort?: (port: number) => number;
+  /** The provider catalog (models, thinking levels, modes); defaults to claude's, read from the daemon. */
+  catalog?: () => Promise<ProviderCatalog>;
   /** Git on the daemon, with the daemon's own credentials (injected for tests). */
   git?: GitRunner;
   /** Builds the seed bundle from the daemon's checkout (injected for tests). */
@@ -144,6 +147,7 @@ export async function connectKube(
   const notice = (sessionId: string, severity: "info" | "warning" | "error", title: string) =>
     emit({ type: "session.notice", sessionId, notice: { id: "kube-pod", severity, title } });
 
+  const catalog = deps.catalog ?? defaultCatalog;
   const git: GitRunner = deps.git ?? runGit;
   const seeder =
     deps.seeder ??
@@ -210,6 +214,11 @@ export async function connectKube(
     if (event.type === "session.persistence" && event.sessionId === sessionId) ps.persistence = event.persistence;
     if (event.type === "session.turn" && event.sessionId === sessionId) {
       ps.turnId = event.state === "started" ? event.turnId : undefined;
+    }
+    if (event.type === "session.config" && event.sessionId === sessionId) {
+      const settings = event.config.settings.filter((setting) => !DUPLICATED_SETTING_IDS.has(setting.id));
+      emit({ ...event, config: { ...event.config, settings } });
+      return;
     }
     // A pod that went away takes the agent process with it; resume on the replacement instead of
     // telling Paseo the session died.
@@ -361,18 +370,7 @@ export async function connectKube(
       if (closed) throw new Error("kube-agents connection is closed");
       switch (input.type) {
         case "catalog":
-          emit({
-            type: "catalog",
-            requestId: input.requestId,
-            catalog: {
-              models: [{ id: "default", label: "Agent default", isDefault: true }],
-              // Paseo validates a requested mode against this list before the pod exists, so it carries
-              // the modes of the default (claude) adapter; the agent reports its own once it is running.
-              modes: AGENT_MODES,
-              defaultModel: "default",
-              defaultMode: "default",
-            },
-          });
+          emit({ type: "catalog", requestId: input.requestId, catalog: await catalog() });
           return;
         case "sessions":
           emit({ type: "sessions", requestId: input.requestId, sessions: [] });

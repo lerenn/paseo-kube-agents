@@ -57,17 +57,45 @@ export interface ComposerAgent {
   featureValues?: Record<string, unknown>;
 }
 
+export interface ModelDefaults {
+  /** Model the composer's provider uses when none was chosen. */
+  model?: string;
+  /** Thinking level of that model when none was chosen. */
+  thinkingOptionId?: string;
+}
+
 /**
- * The pod agent follows the composer: its model (the adapter in the pod resolves the id), thinking
- * level and mode. The provider is always kube-agents. Feature values belong to the composer's own
- * provider and are not forwarded: the kube-agents provider declares none, so Paseo would reject them.
+ * The composer leaves the model and thinking level out when they are the provider's defaults (the
+ * picker still shows them), so those are filled in from the provider's own model list: the pod agent
+ * then starts exactly as the composer displays it. Feature values belong to the composer's provider
+ * and are not forwarded: the kube-agents provider declares none, so Paseo would reject them.
  */
-export function podAgentConfig(agent: ComposerAgent | null | undefined) {
+export function podAgentConfig(agent: ComposerAgent | null | undefined, defaults: ModelDefaults = {}) {
+  const model = agent?.model ?? defaults.model;
+  const thinkingOptionId = agent?.thinkingOptionId ?? (agent?.model ? undefined : defaults.thinkingOptionId);
   return {
-    provider: agent?.model ? `kube-agents/${agent.model}` : POD_AGENT_PROVIDER,
-    ...(agent?.thinkingOptionId ? { thinkingOptionId: agent.thinkingOptionId } : {}),
+    provider: model ? `kube-agents/${model}` : POD_AGENT_PROVIDER,
+    ...(thinkingOptionId ? { thinkingOptionId } : {}),
     ...(agent?.modeId ? { modeId: agent.modeId } : {}),
   };
+}
+
+/** The provider's default model and its default thinking level, from the daemon. Best effort. */
+export async function providerDefaults(
+  client: Pick<PluginClientContext, "paseo">,
+  provider: string | undefined,
+): Promise<ModelDefaults> {
+  if (!provider) return {};
+  try {
+    const result = (await client.paseo.providers.listModels(provider)) as {
+      models?: { id: string; isDefault?: boolean; defaultThinkingOptionId?: string }[];
+    };
+    const models = result.models ?? [];
+    const chosen = models.find((m) => m.isDefault) ?? models[0];
+    return chosen ? { model: chosen.id, thinkingOptionId: chosen.defaultThinkingOptionId } : {};
+  } catch {
+    return {};
+  }
 }
 
 /** The Claude OAuth token: without it a pod agent cannot run. GitHub access needs no pod credential. */
@@ -115,7 +143,7 @@ export function contributePodLocation(client: PluginClientContext): () => void {
         idempotencyKey,
       });
       const agent = await workspace.agents.create({
-        config: podAgentConfig(composer),
+        config: podAgentConfig(composer, await providerDefaults(client, composer?.provider)),
         // Opts the pod agent into the GitHub Proxy plugin (if installed), its only route to GitHub.
         env: { PASEO_GITHUB_PROXY: "on", ...refEnv(ref, slug) },
         prompt,
