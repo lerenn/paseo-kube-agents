@@ -290,6 +290,7 @@ export async function connectKube(
     // A pod that went away takes the agent process with it; resume on the replacement instead of
     // telling Paseo the session died.
     if (event.type === "session.runtime_failed" && event.sessionId === sessionId && ps.opened && !ps.closing) {
+      console.log(`[kube-agents] agent process failed in ${ps.sandbox}: ${event.error.message}${event.error.diagnostic ? ` (${event.error.diagnostic})` : ""}`);
       void recover(sessionId, ps);
       return;
     }
