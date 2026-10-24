@@ -94,6 +94,8 @@ interface WorkspaceState {
   repoUrl?: string;
   agent?: string;
   labelled?: string;
+  /** When labelling the pod or claim last failed (missing `patch` in the Role); retried after a while. */
+  labelFailedAt?: number;
   /** The pod the pod-side setup was last verified for; a replacement pod has another uid and is set up again. */
   readyUid?: string;
   commands: Set<string>;
@@ -365,12 +367,16 @@ export class KubernetesRuntime {
     if (!ws.sandbox) return;
     const meta = this.meta(ws, state);
     const key = this.metaKey(meta);
-    if (ws.labelled === key) return;
+    const retry = ws.labelFailedAt !== undefined && this.now() - ws.labelFailedAt > 5 * 60_000;
+    if (ws.labelled === key && !retry) return;
     ws.labelled = key;
+    ws.labelFailedAt = undefined;
     await kube.patchSandbox(ws.sandbox, metaPatch(meta)).catch(() => undefined);
     const { labels, annotations } = metaPatch(meta).metadata as { labels: Record<string, string>; annotations: Record<string, string> };
-    if (state === "running") await kube.label("pod", ws.sandbox, labels, annotations).catch(() => undefined);
-    await kube.label("pvc", workspaceClaimName(ws.sandbox), labels, annotations).catch(() => undefined);
+    const failed: unknown[] = [];
+    if (state === "running") await kube.label("pod", ws.sandbox, labels, annotations).catch((e) => failed.push(e));
+    await kube.label("pvc", workspaceClaimName(ws.sandbox), labels, annotations).catch((e) => failed.push(e));
+    if (failed.length) ws.labelFailedAt = this.now();
   }
 
   /** Brings the labels of every workspace in line with its current name in Paseo (renames). */
