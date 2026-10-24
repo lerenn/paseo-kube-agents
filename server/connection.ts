@@ -133,6 +133,8 @@ interface PodSession {
   recovering: boolean;
   /** True while the agent session is being reopened on a replacement pod. */
   reopening: boolean;
+  /** Why the last reopen failed, if it did. */
+  reopenFailure?: string;
   closing: boolean;
   /** Timestamps of recent recoveries, to stop a crash loop. */
   recoveries: number[];
@@ -294,7 +296,9 @@ export async function connectKube(
       void recover(sessionId, ps);
       return;
     }
-    // Reopening on a replacement pod is internal: Paseo already has this session open.
+    // Reopening on a replacement pod is internal: Paseo already has this session open. A failed reopen is
+    // kept so the caller can report it instead of carrying on with a session the agent never opened.
+    if (event.type === "request.failed" && event.requestId.startsWith("recover-")) ps.reopenFailure = event.error.message;
     if ("requestId" in event && typeof event.requestId === "string" && event.requestId.startsWith("recover-")) return;
     if (ps.reopening && (event.type === "session.opened" || event.type === "session.ready")) return;
     // The ACP runtime cannot take Paseo's tool policy, so tools preapproved on the daemon are
@@ -325,6 +329,7 @@ export async function connectKube(
     startPodBridge(ps);
     const inner = await startInner(sessionId, ps);
     ps.reopening = true;
+    ps.reopenFailure = undefined;
     try {
       await inner.send({
         type: "session.open",
@@ -337,6 +342,7 @@ export async function connectKube(
     } finally {
       ps.reopening = false;
     }
+    if (ps.reopenFailure) throw new Error(`the agent could not reopen its session: ${ps.reopenFailure}`);
   }
 
   const persistent = config.storage.mode === "persistent";
