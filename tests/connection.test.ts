@@ -224,7 +224,9 @@ describe("kube connection edge cases", () => {
     const conn = await p;
     conn.onEvent((e) => events.push(e));
     await conn.send({ type: "catalog", requestId: "k" });
-    expect((events[0] as any).catalog).toMatchObject({ defaultModel: "default", models: [{ id: "default" }] });
+    expect((events[0] as any).catalog).toMatchObject({ defaultModel: "default", defaultMode: "default", models: [{ id: "default" }] });
+    // Paseo validates a requested mode against the catalog before the pod exists
+    expect((events[0] as any).catalog.modes.map((m: any) => m.id)).toEqual(["default", "acceptEdits", "plan", "auto", "bypassPermissions"]);
   });
 
   it("answers catalog and sessions requests locally", async () => {

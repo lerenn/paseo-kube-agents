@@ -22,6 +22,13 @@ import { createSeed, releaseSeed, seedBundle, type Seed } from "./seed.js";
 import { detectRepo, parseClonePlan, podWorkdir, repoName, type ClonePlan, type RepoRef } from "./workspace.js";
 
 const PROTOCOL_VERSION = 1;
+export const AGENT_MODES = [
+  { id: "default", label: "Always ask" },
+  { id: "acceptEdits", label: "Accept file edits" },
+  { id: "plan", label: "Plan" },
+  { id: "auto", label: "Auto" },
+  { id: "bypassPermissions", label: "Bypass permissions" },
+];
 // `permission.tool_policy` is advertised because Paseo requires it whenever a plugin sets a tool policy
 // on a session. The ACP runtime inside cannot take the policy, so it is not forwarded; instead,
 // permission requests for preapproved MCP tools are answered here (see `isPreapproved`).
@@ -359,8 +366,11 @@ export async function connectKube(
             requestId: input.requestId,
             catalog: {
               models: [{ id: "default", label: "Agent default", isDefault: true }],
-              modes: [],
+              // Paseo validates a requested mode against this list before the pod exists, so it carries
+              // the modes of the default (claude) adapter; the agent reports its own once it is running.
+              modes: AGENT_MODES,
               defaultModel: "default",
+              defaultMode: "default",
             },
           });
           return;
