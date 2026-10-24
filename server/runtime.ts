@@ -372,7 +372,7 @@ export class KubernetesRuntime {
     ws.labelled = key;
     ws.labelFailedAt = undefined;
     await kube.patchSandbox(ws.sandbox, metaPatch(meta)).catch(() => undefined);
-    const { labels, annotations } = metaPatch(meta).metadata as { labels: Record<string, string>; annotations: Record<string, string> };
+    const { labels, annotations } = (metaPatch(meta) as { metadata: unknown }).metadata as { labels: Record<string, string>; annotations: Record<string, string> };
     const failed: unknown[] = [];
     if (state === "running") await kube.label("pod", ws.sandbox, labels, annotations).catch((e) => failed.push(e));
     await kube.label("pvc", workspaceClaimName(ws.sandbox), labels, annotations).catch((e) => failed.push(e));
