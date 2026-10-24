@@ -228,6 +228,35 @@ describe("the 30 second limit on prepare", () => {
   });
 });
 
+describe("workspaceCwd, reconcile with the workspace list, and checkCommand", () => {
+  it("takes the workspace directory from workspaceCwd on any call, not from the (possibly inherited) options", async () => {
+    const t = setup();
+    const inherited = { cwd: "/caller/dir", slug: "caller", ref: null };
+    await t.reg.prepare!({ workspaceId: "wks_i", options: inherited, workspaceCwd: "/home/me/.paseo/worktrees/x/own", purpose: "session", argv: ["claude"], env: {}, mcpServers: {} } as never, t.ctx);
+    expect((t.kube.applied[0] as any).metadata.annotations["paseo.sh/cwd"]).toBe("/home/me/.paseo/worktrees/x/own");
+  });
+
+  it("reconcile deletes the Sandbox of a workspace the list no longer has, keeps listed and young ones", async () => {
+    const t = setup();
+    const old = new Date(0).toISOString(); // the test clock starts at 1,000,000 ms
+    const sb = (name: string, id: string, createdAt: string) => ({ name, labels: { "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace-id": id }, annotations: { "paseo.sh/cwd": CWD }, operatingMode: "Running" as const, createdAt });
+    t.kube.sandboxes = [sb("gone", "wks_gone", old), sb("kept", "wks_kept", old), sb("young", "wks_young", new Date(999_000).toISOString())];
+    await t.reg.reconcile!({ workspaces: [{ workspaceId: "wks_kept", options: t.options, cwd: CWD }] }, t.ctx);
+    expect(t.kube.calls.filter((c) => c.startsWith("delete:sandbox"))).toEqual(["delete:sandbox/gone"]);
+  });
+
+  it("checkCommand: claude and codex are installed on demand; other commands are looked up in a running pod", async () => {
+    const t = setup();
+    const ask = (command: string) => t.reg.checkCommand!({ ...t.base, command } as never);
+    expect(await ask("claude")).toBe(true);
+    expect(await ask("/usr/local/bin/codex")).toBe(true);
+    expect(await ask("some-mcp")).toBe(true); // no pod yet: nothing to ask
+    await t.prepare();
+    t.kube.execResult = { code: 1, stdout: "", stderr: "" };
+    expect(await ask("some-mcp")).toBe(false);
+  });
+});
+
 describe("labels for people", () => {
   it("labels with the agent that ran, follows suspension and renames, and patches the pod and claim too", async () => {
     const t = setup({ podIdleMinutes: 30 });
@@ -349,7 +378,7 @@ describe("suspend, resume and destroy", () => {
     await t.prepare();
     const installs = () => t.kube.inputs.filter((i) => i.argv[4] === "bridge.mjs").length;
     expect(installs()).toBe(1);
-    await t.reg.reconcile!(t.ctx);
+    await t.reg.reconcile!({ workspaces: [{ workspaceId: "wks_1", options: t.options, cwd: CWD }] }, t.ctx);
     t.kube.pods = [{ uid: "replacement", ready: true, terminating: false }];
     await t.prepare();
     expect(installs()).toBe(2);

@@ -6,12 +6,14 @@ import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bri
 import type { KubernetesRuntimeConfig } from "./config.js";
 import { type GitRunner, runGit, scrub } from "./git.js";
 import type { Kube, SandboxInfo } from "./kube.js";
-import { LAUNCH_SCRIPT } from "./pod-assets.js";
+import { INSTALLABLE_CLIS, LAUNCH_SCRIPT } from "./pod-assets.js";
 import { ensureCommand, initSubmodules, installAssets, seedWorkspace, setupMirrors, writeEnvFile } from "./pod-setup.js";
 import { waitPodReady } from "./pod-wait.js";
 import { PodRegistry, type PodState } from "./registry.js";
 import type {
   WorkspaceRuntimeActivityEvent,
+  WorkspaceRuntimeCommandRequest,
+  WorkspaceRuntimeReconcileRequest,
   WorkspaceRuntimeContext,
   WorkspaceRuntimeExecRequest,
   WorkspaceRuntimeFileSystem,
@@ -69,7 +71,7 @@ export interface RuntimeDeps {
   /** Calls `fn` every `ms` until the returned stop function runs (injected for tests). */
   ticker?: (fn: () => void, ms: number) => () => void;
   sleep?: (ms: number) => Promise<void>;
-  /** How long `prepare` and `beforeInput` wait for the pod before returning and letting `exec` wait (Paseo gives them 30s). */
+  /** How long `prepare` and `beforeInput` wait for the pod before returning and letting `exec` wait (Paseo gives them 15 minutes). */
   startWindowMs?: number;
   now?: () => number;
   log?: (line: string) => void;
@@ -188,15 +190,16 @@ export class KubernetesRuntime {
     let ws = this.states.get(request.workspaceId);
     // A workspace that inherited its runtime from the caller comes with the caller's options; its own directory is
     // what `create` was told, so that wins, and the caller's branch choice and name do not apply to it.
-    if (request.cwd && request.cwd !== given.cwd && !ws?.cwdFixed) {
-      const options: RuntimeOptions = { cwd: request.cwd, slug: slugFor(request.cwd), ref: null };
+    const cwd = request.workspaceCwd ?? request.cwd;
+    if (cwd && cwd !== given.cwd && !ws?.cwdFixed) {
+      const options: RuntimeOptions = { cwd, slug: slugFor(cwd), ref: null };
       ws ??= this.newState(request.workspaceId, options);
       ws.options = options;
       ws.cwdFixed = true;
       return ws;
     }
     ws ??= this.newState(request.workspaceId, given);
-    if (request.cwd) ws.cwdFixed = true;
+    if (cwd) ws.cwdFixed = true;
     ws.options = ws.cwdFixed ? { ...given, cwd: ws.options.cwd, slug: ws.options.slug, ref: ws.options.ref, title: ws.options.title ?? given.title } : given;
     return ws;
   }
@@ -486,7 +489,8 @@ export class KubernetesRuntime {
       },
       inspect: (request) => this.inspect(request),
       destroy: (request) => this.destroy(request),
-      reconcile: () => this.reconcile(),
+      reconcile: (request) => this.reconcile(request),
+      checkCommand: (request) => this.checkCommand(request),
       prepare: (request, ctx) => this.prepare(request, ctx),
       beforeInput: (request, ctx) => this.beforeInput(request, ctx),
       onActivity: (event) => this.onActivity(event),
@@ -508,14 +512,13 @@ export class KubernetesRuntime {
   }
 
   /**
-   * Paseo gives `prepare` and `beforeInput` 30 seconds, and a first pod (scheduling, image pull, volume, seeding,
-   * installing the CLI) can take longer. Work runs on the workspace's queue regardless; the call returns when it is
-   * done or when the window ends, and `exec`, which has no deadline, waits for the rest.
+   * Paseo gives `prepare` and `beforeInput` 15 minutes. Work runs on the workspace's queue regardless; the call
+   * returns when it is done or when the window ends, and `exec`, which has no deadline, waits for the rest.
    */
   private async withinWindow(ws: WorkspaceState, ctx: WorkspaceRuntimeContext, work: () => Promise<void>): Promise<void> {
     ws.notice = ctx.notice;
     const job = this.serial(ws, work);
-    const window = this.deps.startWindowMs ?? 20_000;
+    const window = this.deps.startWindowMs ?? 14 * 60_000; // Paseo's deadline for these calls is 15 minutes
     let timer: ReturnType<typeof setTimeout> | undefined;
     const waited = await Promise.race([
       job.then(() => "done" as const),
@@ -578,8 +581,11 @@ export class KubernetesRuntime {
     });
   }
 
-  /** After a pod was lost: forget what was set up in it, so the next launch sets up the replacement. */
-  async reconcile(): Promise<void> {
+  /**
+   * After a daemon restart, a plugin reload or a lost pod: forget what was set up in the pods, adopt the workspaces
+   * Paseo lists, and delete the Sandbox of any workspace it no longer has (archived while the plugin was away).
+   */
+  async reconcile(request?: WorkspaceRuntimeReconcileRequest): Promise<void> {
     for (const ws of this.states.values()) {
       ws.bridge?.close();
       ws.bridge = undefined;
@@ -587,6 +593,44 @@ export class KubernetesRuntime {
       ws.commands.clear();
     }
     await this.adopt().catch(() => undefined);
+    if (!Array.isArray(request?.workspaces)) return; // an older Paseo calls reconcile without the list
+    for (const listed of request.workspaces) {
+      const ws = this.states.get(listed.workspaceId);
+      if (ws) {
+        ws.options = { ...ws.options, cwd: listed.cwd };
+        ws.cwdFixed = true;
+      } else {
+        const options = parseRuntimeOptions({ ...(listed.options ?? {}), cwd: listed.cwd });
+        this.newState(listed.workspaceId, { ...options, cwd: listed.cwd }).cwdFixed = true;
+      }
+    }
+    if (!this.deps.daemonId) return;
+    const live = new Set(request.workspaces.map((w) => w.workspaceId));
+    const config = await this.deps.getConfig();
+    const kube = this.deps.kubeFor(config);
+    for (const sandbox of await kube.listSandboxes(`${DAEMON_LABEL}=${this.deps.daemonId}`).catch(() => [])) {
+      const id = sandbox.labels[WORKSPACE_ID_LABEL];
+      if (!id || live.has(id) || this.now() - (sandbox.createdAt ? Date.parse(sandbox.createdAt) : 0) < 5 * 60_000) continue;
+      this.log(`[kubernetes-runtime] reconcile: deleting sandbox ${sandbox.name} (workspace ${id} no longer exists)`);
+      const ws = this.states.get(id);
+      ws?.bridge?.close();
+      this.states.delete(id);
+      this.deps.registry?.delete(id);
+      await kube.delete("sandbox", sandbox.name).catch(() => undefined);
+      await kube.delete("pvc", workspaceClaimName(sandbox.name)).catch(() => undefined);
+    }
+  }
+
+  /** Whether a provider or MCP server binary exists in the pod. claude and codex are installed on first use, so they do. */
+  async checkCommand(request: WorkspaceRuntimeCommandRequest): Promise<boolean> {
+    const name = request.command.split("/").pop() ?? request.command;
+    if (name in INSTALLABLE_CLIS) return true;
+    const ws = this.workspace(request);
+    if (!ws.sandbox || ws.phase !== "running") return true; // no pod to ask yet; the launch finds out
+    const config = await this.deps.getConfig();
+    const kube = this.deps.kubeFor(config);
+    const found = await kube.exec(ws.sandbox, ["sh", "-c", 'export PATH="$HOME/bin:$HOME/.npm-global/bin:$PATH"; command -v "$1" >/dev/null 2>&1', "sh", request.command]);
+    return found.code === 0;
   }
 
   async exec(request: WorkspaceRuntimeExecRequest, ctx: WorkspaceRuntimeContext & { signal: AbortSignal }): Promise<WorkspaceRuntimeProcess> {
