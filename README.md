@@ -112,8 +112,6 @@ storage and the default-deny NetworkPolicy.
 - Model and version discovery runs on the daemon, so claude and codex must exist there too.
 - A provider that starts its processes inside the plugin process (opencode, pi, omp, plugin providers) is refused in a
   runtime workspace.
-- No warm pool yet: the pod mounts the checkout at the daemon's own path, which is only known when the workspace is
-  created (the fork's `mapCwd` would lift this).
 - Uncommitted local changes are not copied (the seed is a commit).
 - Files of a suspended pod are not available until it wakes.
 
