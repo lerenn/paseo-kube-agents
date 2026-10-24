@@ -1,6 +1,6 @@
 import { Readable } from "node:stream";
 import { HOME_DIR } from "./sandbox.js";
-import { BRIDGE_SCRIPT, GH_SHIM_SCRIPT, INSTALLABLE_CLIS, MIRROR_PRE_RECEIVE, PRE_RECEIVE_HOOK, UPLOAD_PACK_WRAPPER, envFile } from "./pod-assets.js";
+import { BRIDGE_SCRIPT, FS_SCRIPT, GH_SHIM_SCRIPT, INSTALLABLE_CLIS, MIRROR_PRE_RECEIVE, PRE_RECEIVE_HOOK, UPLOAD_PACK_WRAPPER, envFile } from "./pod-assets.js";
 import { MIRROR_SETUP_SCRIPT, mirrorSetupArgs, type FetchTarget } from "./mirrors.js";
 import type { Kube } from "./kube.js";
 import type { Seed } from "./seed.js";
@@ -18,6 +18,7 @@ const write = async (kube: Kube, pod: string, rel: string, content: string, mode
 export async function installAssets(kube: Kube, pod: string): Promise<void> {
   await write(kube, pod, "bridge.mjs", BRIDGE_SCRIPT, "644");
   await write(kube, pod, "bin/gh", GH_SHIM_SCRIPT, "755");
+  await write(kube, pod, "fs.mjs", FS_SCRIPT, "644");
   await write(kube, pod, "outbox.git/hooks/pre-receive", PRE_RECEIVE_HOOK, "755");
   await write(kube, pod, "bin/paseo-upload-pack", UPLOAD_PACK_WRAPPER, "755");
   await write(kube, pod, "mirror-pre-receive", MIRROR_PRE_RECEIVE, "755");

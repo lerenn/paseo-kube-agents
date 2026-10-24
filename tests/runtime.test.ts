@@ -177,6 +177,31 @@ describe("exec: real provider processes in the pod", () => {
   });
 });
 
+describe("inherited runtimes and command execs", () => {
+  it("a workspace that inherited the caller's runtime options uses its own directory and no branch choice", async () => {
+    const seen: { cwd: string; plan: unknown }[] = [];
+    const t = setup({}, { seeder: async (cwd: string, plan: unknown) => (seen.push({ cwd, plan }), fakeSeeder(cwd, plan as never, "main")) });
+    const inherited = { cwd: CWD, slug: "caller-slug", ref: { action: "branch-off", refName: "refs/heads/main" }, title: "caller" };
+    await t.reg.create!({ workspaceId: "wks_new", options: inherited, cwd: "/home/me/.paseo/worktrees/x/feature" } as never, t.ctx);
+    await t.reg.prepare!({ workspaceId: "wks_new", options: inherited, purpose: "session", argv: ["claude"], env: { PASEO_AGENT_ID: "a1" }, mcpServers: {} } as never, t.ctx);
+    expect(seen).toEqual([{ cwd: "/home/me/.paseo/worktrees/x/feature", plan: null }]);
+    expect((t.kube.applied[0] as any).metadata.annotations["paseo.sh/cwd"]).toBe("/home/me/.paseo/worktrees/x/feature");
+  });
+
+  it("runs Git-style commands without a prepare, never installs a CLI for them, and does not wake a suspended pod for a background refresh", async () => {
+    const t = setup({ podIdleMinutes: 30 });
+    const exec = (over: object) => t.reg.exec!({ ...t.base, purpose: "command", argv: ["git", "status"], env: {}, ...over } as never, t.ctx);
+    await expect(exec({ interactive: false })).rejects.toThrow(/background refreshes do not wake it/);
+    const proc = await exec({ interactive: true });
+    expect(proc).toBeTruthy();
+    expect(t.kube.applied).toHaveLength(1); // an interactive command started the pod
+    expect(t.kube.execs.some((e) => e.argv.join(" ").includes("command -v"))).toBe(false); // git is not a provider CLI
+    t.advance(31 * MIN);
+    await t.tick();
+    await expect(exec({ interactive: false })).rejects.toThrow(/background refreshes/);
+  });
+});
+
 describe("the 30 second limit on prepare", () => {
   it("returns from prepare when the window ends while the pod is still starting, and exec waits for the rest", async () => {
     const t = setup({}, { startWindowMs: 0 });

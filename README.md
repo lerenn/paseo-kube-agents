@@ -97,15 +97,25 @@ start (originals backed up under `~/.paseo/backups/`, never overwritten, never d
 See [docs/rbac-and-network.md](docs/rbac-and-network.md): Role for the daemon ServiceAccount, the credentials Secret,
 storage and the default-deny NetworkPolicy.
 
-## Limits (phase 1 of the workspace runtime)
+## What Paseo does with the pod
 
-- Files, Git and terminals in the Paseo UI still read the **daemon's** checkout, not the pod's. Claude's own history
-  lives in the pod.
+- **Files panel** (Paseo with runtime files, fork #28): served from the pod through `fs` (stat, list, read, write,
+  create, rename, copy, delete), confined to the workspace directory; a symlink that leaves it is refused. Only while
+  the pod runs: a suspended or not-yet-started pod answers `EAGAIN`, and polling never wakes it or keeps it awake.
+- **Git panel** (`exec` with purpose `command`): Git for a runtime workspace runs in the pod. A refresh in the
+  background (`interactive: false`) is refused when the pod is not running; one the user waits for starts the pod.
+- **Workspaces created by agents** inherit the caller's runtime (fork #22): the runtime is told the new workspace's
+  directory, which replaces the caller's directory in the copied options, and seeds from that directory's HEAD.
+
+## Limits
+
 - Model and version discovery runs on the daemon, so claude and codex must exist there too.
 - A provider that starts its processes inside the plugin process (opencode, pi, omp, plugin providers) is refused in a
   runtime workspace.
-- No warm pool: the pod must mount the checkout at a path that is only known when the workspace is created.
+- No warm pool yet: the pod mounts the checkout at the daemon's own path, which is only known when the workspace is
+  created (the fork's `mapCwd` would lift this).
 - Uncommitted local changes are not copied (the seed is a commit).
+- Files of a suspended pod are not available until it wakes.
 
 ## Development
 
