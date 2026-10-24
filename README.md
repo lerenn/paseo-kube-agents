@@ -104,6 +104,10 @@ storage and the default-deny NetworkPolicy.
   the pod runs: a suspended or not-yet-started pod answers `EAGAIN`, and polling never wakes it or keeps it awake.
 - **Git panel** (`exec` with purpose `command`): Git for a runtime workspace runs in the pod. A refresh in the
   background (`interactive: false`) is refused when the pod is not running; one the user waits for starts the pod.
+- **Reconcile and checks**: Paseo lists the live workspaces on every registration (daemon start, plugin reload) and after
+  a lost pod; a Sandbox for any other workspace (older than 5 minutes) is deleted with its volume. Before a session
+  Paseo asks whether the provider binary exists (`claude` and `codex` are installed on first use, so they do) and
+  warns about stdio MCP servers whose binary is missing from the image.
 - **Workspaces created by agents** inherit the caller's runtime (fork #22): the runtime is told the new workspace's
   directory, which replaces the caller's directory in the copied options, and seeds from that directory's HEAD.
 

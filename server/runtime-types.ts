@@ -33,6 +33,20 @@ export interface WorkspaceRuntimeWorkspaceRequest {
   options?: WorkspaceRuntimeOptions;
   /** The workspace directory on the daemon. Sent with `create` and `mapCwd`. */
   cwd?: string;
+  /**
+   * The workspace directory on the daemon, on every call (`cwd` of an exec is the process's). A
+   * workspace that inherited its runtime also inherited the caller's `options`, so recover the
+   * directory from here, not from them.
+   */
+  workspaceCwd?: string;
+}
+
+export interface WorkspaceRuntimeReconcileRequest {
+  workspaces: Array<{ workspaceId: string; options?: WorkspaceRuntimeOptions; cwd: string }>;
+}
+
+export interface WorkspaceRuntimeCommandRequest extends WorkspaceRuntimeWorkspaceRequest {
+  command: string;
 }
 
 export interface WorkspaceRuntimeStatus {
@@ -209,8 +223,21 @@ export interface WorkspaceRuntimeRegistration {
     request: WorkspaceRuntimeWorkspaceRequest,
     context: WorkspaceRuntimeContext,
   ): void | Promise<void>;
-  /** Re-adopt sandboxes after a daemon restart or a `runtime-lost` exit. */
-  reconcile?(context: WorkspaceRuntimeContext): void | Promise<void>;
+  /**
+   * Re-adopt sandboxes after a daemon restart, a plugin reload or a `runtime-lost` exit. The
+   * request lists every live workspace of this runtime; a sandbox for any other workspace is an
+   * orphan (its workspace was archived while the runtime was away) and may be deleted.
+   */
+  reconcile?(
+    request: WorkspaceRuntimeReconcileRequest,
+    context: WorkspaceRuntimeContext,
+  ): void | Promise<void>;
+  /**
+   * Whether `command` exists in the runtime's image. Paseo checks the provider's binary before
+   * a session starts and the stdio MCP servers of the agent in `prepare`, and tells the user
+   * which one is missing. Omit it to skip the check.
+   */
+  checkCommand?(request: WorkspaceRuntimeCommandRequest): boolean | Promise<boolean>;
   /**
    * Runs before every session launch with the final command, environment and MCP servers.
    * Idempotent: a resume prepares again.
