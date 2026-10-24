@@ -78,3 +78,50 @@ describe("credentials", () => {
     expect(kube.patches).toHaveLength(0);
   });
 });
+
+import { chmodSync } from "node:fs";
+import { Kubectl } from "../server/kube.js";
+import { removeCredential } from "../server/credentials.js";
+
+describe("removing a credential", () => {
+  const fake = join(process.cwd(), "tests", "fake-kubectl.mjs");
+
+  it("sends a merge patch with null through kubectl proxy, never reading the reply", async () => {
+    chmodSync(fake, 0o755);
+    const log = join(mkdtempSync(join(tmpdir(), "kube-rm-")), "log");
+    process.env.FAKE_KUBECTL_LOG = log;
+    delete process.env.FAKE_KUBECTL_STATUS;
+    await new Kubectl({ binary: fake, namespace: "paseo-agents", context: "ctx" }).removeSecretKey("paseo-agent-credentials", "CLAUDE_CODE_OAUTH_TOKEN");
+    const lines = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    expect(lines[0].argv).toEqual(["--context", "ctx", "proxy", "--port=0"]);
+    expect(lines[1]).toEqual({
+      method: "PATCH",
+      url: "/api/v1/namespaces/paseo-agents/secrets/paseo-agent-credentials",
+      type: "application/merge-patch+json",
+      body: JSON.stringify({ data: { CLAUDE_CODE_OAUTH_TOKEN: null } }),
+    });
+  });
+
+  it("fails on a refusal without leaking the reply", async () => {
+    chmodSync(fake, 0o755);
+    process.env.FAKE_KUBECTL_STATUS = "403";
+    const err = await new Kubectl({ binary: fake, namespace: "n" }).removeSecretKey("s", "CLAUDE_CODE_OAUTH_TOKEN").catch((e: Error) => e);
+    delete process.env.FAKE_KUBECTL_STATUS;
+    expect((err as Error).message).toBe("removing CLAUDE_CODE_OAUTH_TOKEN failed: HTTP 403");
+    expect((err as Error).message).not.toContain("c2VjcmV0");
+  });
+
+  it("clears the local flag only after the cluster accepted the removal", async () => {
+    const kube = new FakeKube();
+    const path = statePath();
+    await setCredential(kube, "s", "CLAUDE_CODE_OAUTH_TOKEN", "tok-1", path);
+    kube.removeError = new Error("forbidden");
+    await expect(removeCredential(kube, "s", "CLAUDE_CODE_OAUTH_TOKEN", path)).rejects.toThrow("forbidden");
+    expect(readStatus(path).CLAUDE_CODE_OAUTH_TOKEN).toBe(true);
+    kube.removeError = undefined;
+    const status = await removeCredential(kube, "s", "CLAUDE_CODE_OAUTH_TOKEN", path);
+    expect(kube.removed).toEqual(["CLAUDE_CODE_OAUTH_TOKEN"]);
+    expect(status.CLAUDE_CODE_OAUTH_TOKEN).toBe(false);
+    expect(readStatus(path).CLAUDE_CODE_OAUTH_TOKEN).toBe(false);
+  });
+});

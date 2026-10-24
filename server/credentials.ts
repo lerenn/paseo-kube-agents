@@ -54,3 +54,17 @@ export async function setCredential(
   writeFileSync(statePath, JSON.stringify(status), { mode: 0o600 });
   return status;
 }
+
+/** Removes a credential from the Secret, and from the local set flags only once the cluster accepted it. */
+export async function removeCredential(
+  kube: Kube,
+  secret: string,
+  key: CredentialKey,
+  statePath = defaultStatePath(),
+): Promise<Record<string, boolean>> {
+  await kube.removeSecretKey(secret, key);
+  const status = { ...readStatus(statePath), [key]: false };
+  mkdirSync(dirname(statePath), { recursive: true });
+  writeFileSync(statePath, JSON.stringify(status), { mode: 0o600 });
+  return status;
+}

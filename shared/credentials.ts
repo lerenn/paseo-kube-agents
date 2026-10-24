@@ -21,3 +21,9 @@ export const credentialsSet = defineRpc({
   input: z.object({ key: CredentialKeySchema, value: z.string().min(1).max(8192) }),
   output: z.object({ set: z.record(z.string(), z.boolean()) }),
 });
+
+export const credentialsRemove = defineRpc({
+  name: "kube.credentials.remove",
+  input: z.object({ key: CredentialKeySchema }),
+  output: z.object({ set: z.record(z.string(), z.boolean()) }),
+});
