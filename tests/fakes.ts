@@ -1,11 +1,6 @@
-import type { AcpConnector, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
-import type {
-  ProviderConnection,
-  ProviderEvent,
-  ProviderInput,
-  ProviderRegistration,
-} from "@getpaseo/plugin/server/provider";
-import type { ClaimInfo, ExecResult, Kube, PodInfo, SandboxInfo } from "../server/kube.js";
+import { PassThrough } from "node:stream";
+import type { AcpStreamMessage } from "@getpaseo/plugin/server/acp";
+import type { ClaimInfo, ExecResult, Kube, PodInfo, PodProcess, SandboxInfo } from "../server/kube.js";
 
 export class FakeKube implements Kube {
   calls: string[] = [];
@@ -51,6 +46,19 @@ export class FakeKube implements Kube {
     this.calls.push("execInput");
     this.inputs.push({ pod, argv, bytes });
     return this.execResult;
+  }
+  /** Provider processes started in the pod: their argv, and handles to end them. */
+  procs: { pod: string; argv: string[]; stdin: PassThrough; stdout: PassThrough; stderr: PassThrough; end(code: number | null, signal?: string | null): void; killed: string[] }[] = [];
+  spawnExec(pod: string, argv: string[]): PodProcess {
+    this.calls.push("spawn");
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    const killed: string[] = [];
+    let finish!: (v: { code: number | null; signal: string | null }) => void;
+    const exit = new Promise<{ code: number | null; signal: string | null }>((resolve) => (finish = resolve));
+    this.procs.push({ pod, argv, stdin, stdout, stderr, killed, end: (code, signal = null) => finish({ code, signal }) });
+    return { stdin, stdout, stderr, exit, kill: (sig) => void killed.push(sig ?? "SIGTERM") };
   }
   execStream(pod: string, argv: string[]) {
     this.streams.push({ pod, argv });
@@ -100,89 +108,8 @@ export class FakeKube implements Kube {
   }
 }
 
-/** Stands in for the ACP runtime: records inputs, replays a scripted event stream. */
-export class FakeAcp {
-  inputs: ProviderInput[] = [];
-  listeners = new Set<(e: ProviderEvent) => void>();
-  closed = false;
-  closeCount = 0;
-  /** Like the real ACP runtime: `send(session.open)` returns at once and the session opens afterwards. */
-  holdOpen = false;
-  failOpen?: string;
-  heldOpen?: { requestId: string; sessionId: string; cwd: string };
-  connector?: AcpConnector;
-
-  provider = (connector: AcpConnector): ProviderRegistration => {
-    this.connector = connector;
-    return {
-      id: "fake",
-      label: "fake",
-      connect: async (): Promise<ProviderConnection> => ({
-        version: 1,
-        capabilities: [],
-        send: async (input) => {
-          this.inputs.push(input);
-          if (input.type === "session.open" && this.failOpen) {
-            this.emit({ type: "request.failed", requestId: input.requestId, error: { message: this.failOpen } });
-            return;
-          }
-          if (input.type === "session.open" && this.holdOpen) {
-            this.heldOpen = { requestId: input.requestId, sessionId: input.sessionId, cwd: input.config.cwd };
-            return;
-          }
-          if (input.type === "session.open") {
-            this.emit({ type: "session.opened", requestId: input.requestId, sessionId: input.sessionId, capabilities: ["prompt.image", "session.persistence"], restoration: "core", cwd: input.config.cwd, persistence: { version: 1, data: { sessionId: `native-${input.sessionId}` } } });
-            this.emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
-          }
-          if (input.type === "session.prompt" && (input.prompt.input as any).content?.[0]?.text === "ask") {
-            this.emit({
-              type: "session.permission",
-              sessionId: input.sessionId,
-              request: {
-                id: "permission:c1",
-                name: "mcp__everything__echo",
-                kind: "tool",
-                actions: [
-                  { id: "allow_always", label: "Always", behavior: "allow" },
-                  { id: "allow_once", label: "Once", behavior: "allow" },
-                  { id: "reject_once", label: "No", behavior: "deny" },
-                ],
-              },
-            });
-            return;
-          }
-          if (input.type === "session.prompt") {
-            this.emit({ type: "session.turn", sessionId: input.sessionId, turnId: "t1", state: "started" });
-            this.emit({ type: "timeline.item", sessionId: input.sessionId, item: { id: "m1", type: "assistant_message", text: "hello from pod" } });
-            this.emit({ type: "session.turn", sessionId: input.sessionId, turnId: "t1", state: "completed" });
-          }
-        },
-        onEvent: (l) => {
-          this.listeners.add(l);
-          return () => this.listeners.delete(l);
-        },
-        close: async () => {
-          this.closed = true;
-          this.closeCount++;
-        },
-      }),
-    };
-  };
-
-  /** Finishes a held open, as the runtime does once the agent process has loaded the session. */
-  finishOpen() {
-    const held = this.heldOpen!;
-    this.emit({ type: "session.opened", requestId: held.requestId, sessionId: held.sessionId, capabilities: [], restoration: "core", cwd: held.cwd });
-    this.emit({ type: "session.ready", requestId: held.requestId, sessionId: held.sessionId });
-  }
-
-  emit(event: ProviderEvent) {
-    for (const l of this.listeners) l(event);
-  }
-}
-
 import { Readable } from "node:stream";
-import type { SeedBundle } from "../server/connection.js";
+import type { SeedBundle } from "../server/runtime.js";
 
 /** Stands in for the daemon-side seed bundle so tests need no git checkout. */
 export const fakeSeeder = async (_cwd: string, plan: { branch?: string } | null, currentBranch: string): Promise<SeedBundle> => ({

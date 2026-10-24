@@ -1,5 +1,6 @@
 import { Readable } from "node:stream";
-import { BRIDGE_SCRIPT, GH_SHIM_SCRIPT, PRE_RECEIVE_HOOK, envFile } from "./pod-assets.js";
+import { HOME_DIR } from "./sandbox.js";
+import { BRIDGE_SCRIPT, GH_SHIM_SCRIPT, INSTALLABLE_CLIS, PRE_RECEIVE_HOOK, envFile } from "./pod-assets.js";
 import type { Kube } from "./kube.js";
 import type { Seed } from "./seed.js";
 
@@ -12,12 +13,11 @@ const write = async (kube: Kube, pod: string, rel: string, content: string, mode
   if (r.code !== 0) throw new Error(`could not write ${rel} in the pod: ${r.stderr.trim()}`);
 };
 
-/** Writes the bridge, the `gh` shim, the push hook and the proxy env into the pod. Safe to repeat. */
-export async function installAssets(kube: Kube, pod: string, sessionEnv: Readonly<Record<string, string>>): Promise<void> {
+/** Writes the bridge, the `gh` shim and the push hook into the pod. Safe to repeat. */
+export async function installAssets(kube: Kube, pod: string): Promise<void> {
   await write(kube, pod, "bridge.mjs", BRIDGE_SCRIPT, "644");
   await write(kube, pod, "bin/gh", GH_SHIM_SCRIPT, "755");
   await write(kube, pod, "outbox.git/hooks/pre-receive", PRE_RECEIVE_HOOK, "755");
-  await write(kube, pod, ".kube-env", envFile(sessionEnv), "600");
 }
 
 const SEED_SCRIPT = `set -e
@@ -68,4 +68,21 @@ export async function seedWorkspace(
     target.newBranch ?? "",
   ]);
   if (built.code !== 0) throw new Error(`could not build the workspace in the pod: ${built.stderr.trim()}`);
+}
+
+/** Writes the env file of one provider process and returns its path inside the pod. */
+export async function writeEnvFile(kube: Kube, pod: string, id: string, env: Readonly<Record<string, string>>): Promise<string> {
+  const rel = `.exec-env/${id}`;
+  await write(kube, pod, rel, envFile(env), "600");
+  return `${HOME_DIR}/${rel}`;
+}
+
+/** Makes sure the provider's command exists in the pod, installing claude or codex once (on the volume) if not. */
+export async function ensureCommand(kube: Kube, pod: string, command: string): Promise<void> {
+  const present = await kube.exec(pod, ["sh", "-c", 'export PATH="$HOME/bin:$HOME/.npm-global/bin:$PATH"; command -v "$1" >/dev/null 2>&1', "sh", command]);
+  if (present.code === 0) return;
+  const pkg = INSTALLABLE_CLIS[command];
+  if (!pkg) throw new Error(`${command} is not in the pod image and cannot be installed automatically; use an image that contains it`);
+  const installed = await kube.exec(pod, ["sh", "-c", 'npm install -g --prefix "$HOME/.npm-global" "$1" >/dev/null 2>&1', "sh", pkg]);
+  if (installed.code !== 0) throw new Error(`could not install ${pkg} in the pod: ${installed.stderr.trim() || "npm failed"}`);
 }

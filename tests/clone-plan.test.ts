@@ -1,16 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { refEnv } from "../shared/pod-ref.js";
 import { sandboxName } from "../server/sandbox.js";
-import { parseClonePlan, repoName, shortBranch } from "../server/workspace.js";
+import { clonePlan, repoName, shortBranch } from "../server/workspace.js";
 
 describe("clone plan", () => {
-  it("round-trips the branch picker choice through env", () => {
-    const env = refEnv({ action: "branch-off", refName: "refs/heads/main" }, "brave-otter-12");
-    expect(parseClonePlan(env)).toEqual({ action: "branch-off", branch: "main", slug: "brave-otter-12" });
-    const pr = refEnv({ action: "checkout", refName: "feat/x", changeRequest: { forge: "github", number: 42 } }, "s");
-    expect(parseClonePlan(pr)).toEqual({ action: "checkout", branch: "feat/x", pullRequest: 42, slug: "s" });
-    expect(parseClonePlan(refEnv(null, "s"))).toBeNull();
-    expect(parseClonePlan({})).toBeNull();
+  it("turns the branch picker's choice (the runtime options) into a seed plan", () => {
+    expect(clonePlan({ cwd: "/p", slug: "brave-otter-12", ref: { action: "branch-off", refName: "refs/heads/main" } })).toEqual({ action: "branch-off", branch: "main", slug: "brave-otter-12" });
+    expect(clonePlan({ cwd: "/p", slug: "s", ref: { action: "checkout", refName: "feat/x", changeRequest: { forge: "github", number: 42 } } })).toEqual({ action: "checkout", branch: "feat/x", pullRequest: 42, slug: "s" });
+    expect(clonePlan({ cwd: "/p", slug: "s", ref: null })).toBeNull();
+    expect(clonePlan({ cwd: "/p" })).toBeNull();
   });
 
   it("strips ref prefixes", () => {

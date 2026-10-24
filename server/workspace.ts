@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { REF_ENV_KEYS } from "../shared/pod-ref.js";
-import { WORKSPACE_ROOT } from "./sandbox.js";
+import type { RuntimeOptions } from "../shared/runtime-options.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -28,36 +27,30 @@ export async function detectRepo(cwd: string): Promise<RepoRef> {
   return { url, branch };
 }
 
-export function podWorkdir(sessionName: string): string {
-  return `${WORKSPACE_ROOT}/${sessionName}`;
-}
-
-/** What Paseo's branch picker chose, handed to the provider through the agent's env. */
+/** What Paseo's branch picker chose, as the seed needs it. */
 export interface ClonePlan {
   action: "branch-off" | "checkout";
   /** Base branch (branch-off) or branch to open (checkout), without the refs/heads/ prefix. */
   branch?: string;
   /** Pull request number, when a change request was picked. */
   pullRequest?: number;
-  /** Name of the new branch for branch-off, and of the pod. */
+  /** Name of the new branch for branch-off. */
   slug?: string;
 }
-
-const REF_ENV = REF_ENV_KEYS;
 
 export function shortBranch(ref: string): string {
   return ref.replace(/^refs\/(heads|remotes\/origin)\//, "").replace(/^origin\//, "");
 }
 
-export function parseClonePlan(env: Readonly<Record<string, string>>): ClonePlan | null {
-  const action = env[REF_ENV.action];
-  if (action !== "branch-off" && action !== "checkout") return null;
-  const pr = Number.parseInt(env[REF_ENV.pullRequest] ?? "", 10);
+/** The seed plan for a workspace's options; null seeds the checkout's current HEAD. */
+export function clonePlan(options: RuntimeOptions): ClonePlan | null {
+  const { ref, slug } = options;
+  if (!ref) return null;
   return {
-    action,
-    ...(env[REF_ENV.ref] ? { branch: shortBranch(env[REF_ENV.ref]!) } : {}),
-    ...(Number.isFinite(pr) ? { pullRequest: pr } : {}),
-    ...(env[REF_ENV.slug] ? { slug: env[REF_ENV.slug] } : {}),
+    action: ref.action,
+    ...(ref.refName ? { branch: shortBranch(ref.refName) } : {}),
+    ...(ref.changeRequest ? { pullRequest: ref.changeRequest.number } : {}),
+    ...(slug ? { slug } : {}),
   };
 }
 

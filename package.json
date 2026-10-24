@@ -1,8 +1,8 @@
 {
-  "name": "paseo-kube-agents",
+  "name": "paseo-kubernetes-runtime",
   "private": true,
   "version": "0.1.0",
-  "description": "Run each Paseo agent in its own Kubernetes pod.",
+  "description": "Run Paseo workspaces in Kubernetes pods.",
   "license": "MIT",
   "files": [
     "paseo-plugin.json",

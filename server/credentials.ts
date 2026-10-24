@@ -5,7 +5,7 @@ import { CREDENTIAL_KEYS, type CredentialKey } from "../shared/credentials.js";
 import type { Kube } from "./kube.js";
 
 export function defaultStatePath(): string {
-  return join(homedir(), ".paseo", "kube-agents-credentials.json");
+  return join(homedir(), ".paseo", "kubernetes-runtime-credentials.json");
 }
 
 /**

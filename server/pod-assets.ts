@@ -145,14 +145,23 @@ done
 exit 0
 `;
 
-/** Wraps the agent command: loads the proxy env, puts the shims on PATH, then runs the agent. */
-export const LAUNCH_SCRIPT = `. "$HOME/.kube-env" 2>/dev/null; export PATH="$HOME/bin:$PATH"; exec "$@"`;
+/**
+ * Starts a provider process: loads its env file (then deletes it), moves to the workspace directory, puts the
+ * shims and installed CLIs on PATH, and runs the command exactly as the provider asked.
+ * Arguments: env file, directory, then the command and its arguments.
+ */
+export const LAUNCH_SCRIPT = `. "$1" || exit 1; rm -f "$1"; cd "$2" || exit 1; shift 2; export PATH="$HOME/bin:$HOME/.npm-global/bin:$PATH"; exec "$@"`;
 
-/** Env file for the agent process: only the GitHub Proxy loopback URL and its per-agent capability. */
-export function envFile(sessionEnv: Readonly<Record<string, string>>): string {
-  const keys = ["PASEO_GITHUB_PROXY_URL", "PASEO_GITHUB_PROXY_CAPABILITY", "PASEO_GITHUB_PROXY"];
-  return keys
-    .filter((k) => sessionEnv[k])
-    .map((k) => `export ${k}='${sessionEnv[k]!.replace(/'/g, "'\\''")}'\n`)
+/** An env file for the provider process: the env delta Paseo asked for, and nothing from the daemon. */
+export function envFile(env: Readonly<Record<string, string>>): string {
+  return Object.entries(env)
+    .filter(([key]) => /^[A-Za-z_][A-Za-z0-9_]*$/.test(key))
+    .map(([key, value]) => `export ${key}='${value.replace(/'/g, "'\\''")}'\n`)
     .join("");
 }
+
+/** Provider commands the runtime can install on first use when the image lacks them. */
+export const INSTALLABLE_CLIS: Readonly<Record<string, string>> = {
+  claude: "@anthropic-ai/claude-code",
+  codex: "@openai/codex",
+};

@@ -1,4 +1,4 @@
-# Fat default image for kube-agents pods. Contains NO credentials: tokens arrive at runtime
+# Fat default image for Kubernetes Runtime pods. Contains NO credentials: tokens arrive at runtime
 # through the paseo-agent-credentials Secret (envFrom).
 FROM node:22-bookworm
 
@@ -12,7 +12,7 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o 
  && apt-get update && apt-get install -y gh && rm -rf /var/lib/apt/lists/*
 
 # Agent CLIs and their ACP adapters (the pod speaks ACP over stdio via `kubectl exec`).
-RUN npm install -g @anthropic-ai/claude-code @agentclientprotocol/claude-agent-acp @openai/codex
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
 RUN useradd -m -u 1000 agent && mkdir -p /workspace && chown agent /workspace
 USER agent

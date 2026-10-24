@@ -15,15 +15,19 @@ export class LocalPodKube implements Kube {
   readonly root = mkdtempSync(join(tmpdir(), "kube-localpod-"));
   readonly home = join(this.root, "home");
   readonly workspace = join(this.root, "workspace");
+  /** The pod's copy of the daemon checkout: the daemon's own path would be the very directory the test runs against. */
+  readonly checkout = join(this.root, "checkout");
   deleted: string[] = [];
   children: ChildProcess[] = [];
 
-  constructor() {
+  constructor(private readonly daemonCwd?: string) {
     mkdirSync(this.home, { recursive: true });
     mkdirSync(this.workspace, { recursive: true });
+    mkdirSync(this.checkout, { recursive: true });
   }
 
-  private map = (argv: string[]) => argv.map((a) => a.replaceAll("/workspace", this.workspace));
+  private map = (argv: string[]) =>
+    argv.map((a) => (this.daemonCwd ? a.replaceAll(this.daemonCwd, this.checkout) : a).replaceAll("/workspace", this.workspace));
   /** A pod has no GitHub credentials; drop any the test runner happens to have. */
   private env = () => {
     const { GH_TOKEN: _a, GITHUB_TOKEN: _b, ...rest } = process.env;
@@ -74,6 +78,10 @@ export class LocalPodKube implements Kube {
       if (input) input.pipe(child.stdin);
       else child.stdin.end();
     });
+  }
+
+  spawnExec(): never {
+    throw new Error("not used by the local pod");
   }
 
   execStream(_pod: string, argv: string[]) {

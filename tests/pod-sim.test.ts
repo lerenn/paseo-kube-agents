@@ -5,10 +5,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { ConfigSchema } from "../shared/settings.js";
-import { connectKube } from "../server/connection.js";
-import { FakeAcp } from "./fakes.js";
+import { KubernetesRuntime } from "../server/runtime.js";
 import { LocalPodKube } from "./local-pod.js";
 
 const ID = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -42,35 +40,28 @@ afterEach(() => {
   while (cleanups.length) cleanups.pop()!();
 });
 
-async function openSession(env: Record<string, string> = {}, mcpServers: Record<string, any> = {}, tunnel?: { pod: number; daemon: number }) {
+async function openSession(argv0 = "sh", mcpServers: Record<string, any> = {}, tunnel?: { pod: number; daemon: number }, env: Record<string, string> = {}) {
   const { origin, project } = repos();
-  const kube = new LocalPodKube();
-  const acp = new FakeAcp();
-  const events: ProviderEvent[] = [];
-  const conn = await connectKube(
-    { versions: [1], capabilities: ["prompt.message"] },
-    {
-      config: ConfigSchema.parse({ readyTimeoutSeconds: 5 }),
-      kube,
-      acpProvider: acp.provider,
-      eager: true,
-      mapTunnelPort: tunnel ? (p) => (p === tunnel.pod ? tunnel.daemon : p) : undefined,
-    },
-  );
-  conn.onEvent((e) => events.push(e));
-  cleanups.push(() => kube.stop());
-  await conn.send({
-    type: "session.open",
-    requestId: "r",
-    sessionId: "s",
-    config: { cwd: project, env, mcpServers, settings: {}, persist: false },
-    history: "skip",
+  const kube = new LocalPodKube(project);
+  const runtime = new KubernetesRuntime({
+    getConfig: async () => ConfigSchema.parse({ readyTimeoutSeconds: 5 }),
+    kubeFor: () => kube,
+    daemonId: "srv_ME",
+    log: () => undefined,
+    mapTunnelPort: tunnel ? (p) => (p === tunnel.pod ? tunnel.daemon : p) : undefined,
+    ticker: () => () => undefined,
   });
-  const failed = events.find((e) => e.type === "request.failed") as any;
-  if (failed) throw new Error(failed.error.message);
-  const dir = (acp.inputs[0] as any).config.cwd as string;
-  const podDir = dir.replace("/workspace", kube.workspace);
-  return { origin, project, kube, podDir, conn, events };
+  cleanups.push(() => {
+    runtime.stop();
+    kube.stop();
+  });
+  const notices: string[] = [];
+  const ctx = { notice: (m: string) => void notices.push(m), signal: new AbortController().signal };
+  await runtime.registration().prepare!(
+    { workspaceId: "wks_1", options: { cwd: project, slug: "brave-otter-12", ref: null }, purpose: "session", argv: [argv0], env, mcpServers } as never,
+    ctx,
+  );
+  return { origin, project, kube, podDir: kube.checkout, notices, runtime };
 }
 
 describe("seeded pod workspace and push-back (real git, real pod scripts)", () => {
@@ -161,7 +152,7 @@ describe("loopback tunnel to the daemon's MCP servers", () => {
     const podPort = (probe.address() as AddressInfo).port;
     await new Promise((r) => probe.close(r));
 
-    const { kube } = await openSession({}, { inbox: { type: "http", url: `http://127.0.0.1:${podPort}/mcp`, headers: { authorization: "Bearer cap" } } }, { pod: podPort, daemon: daemonPort });
+    const { kube } = await openSession("sh", { inbox: { type: "http", url: `http://127.0.0.1:${podPort}/mcp`, headers: { authorization: "Bearer cap" } } }, { pod: podPort, daemon: daemonPort });
     await wait(async () => (await kube.as(["node", "-e", `require("net").connect(${podPort},"127.0.0.1").on("connect",()=>process.exit(0)).on("error",()=>process.exit(1))`])).code === 0);
     const out = await kube.as(["node", "-e", `fetch("http://127.0.0.1:${podPort}/mcp",{method:"POST",headers:{authorization:"Bearer cap"},body:"{}"}).then(async r=>{let t="";for await(const c of r.body)t+=Buffer.from(c).toString();console.log(r.status,t.replace(/\\n/g,"|"))})`]);
     expect(out.code, out.stderr).toBe(0);
@@ -174,7 +165,7 @@ describe("loopback tunnel to the daemon's MCP servers", () => {
     await new Promise<void>((r) => daemon.listen(0, "127.0.0.1", r));
     cleanups.push(() => daemon.close());
     const port = (daemon.address() as AddressInfo).port;
-    const { kube } = await openSession({}, {});
+    const { kube } = await openSession("sh", {});
     const r = await kube.as(["node", "-e", `require("net").connect(${port},"127.0.0.1").on("connect",()=>process.exit(0)).on("error",()=>process.exit(3))`]);
     // nothing listens inside the pod on that port, and the daemon's server is not reachable through the bridge
     expect([0, 3]).toContain(r.code);

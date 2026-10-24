@@ -1,6 +1,15 @@
 import { spawn } from "node:child_process";
-import type { Readable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import type { AcpStream, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
+
+export interface PodProcess {
+  stdin: Writable;
+  stdout: Readable;
+  stderr: Readable;
+  /** Resolves when the exec ends (the process, or the connection to the pod). */
+  exit: Promise<{ code: number | null; signal: string | null }>;
+  kill(signal?: string): void;
+}
 
 export interface PodInfo {
   uid: string;
@@ -87,6 +96,8 @@ export interface Kube {
   execInput(pod: string, argv: string[], input: Readable): Promise<ExecResult>;
   /** Long-lived stdio JSON-RPC (ndjson) stream to a process inside the pod. */
   execStream(pod: string, argv: string[]): AcpStream;
+  /** A process in the pod with raw stdio, for the provider processes Paseo asks the runtime to start. */
+  spawnExec(pod: string, argv: string[]): PodProcess;
   delete(kind: string, name: string): Promise<void>;
   readonly namespace: string;
   /**
@@ -221,6 +232,21 @@ export class Kubectl implements Kube {
       input.on("error", reject);
       input.pipe(child.stdin);
     });
+  }
+
+  spawnExec(pod: string, argv: string[]): PodProcess {
+    const child = spawn(this.binary, [...this.base, "exec", "-i", pod, "--", ...argv], { stdio: ["pipe", "pipe", "pipe"] });
+    const exit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+      child.on("error", () => resolve({ code: 127, signal: null }));
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    return {
+      stdin: child.stdin!,
+      stdout: child.stdout!,
+      stderr: child.stderr!,
+      exit,
+      kill: (signal) => void child.kill((signal as NodeJS.Signals | undefined) ?? "SIGTERM"),
+    };
   }
 
   execStream(pod: string, argv: string[]): AcpStream {

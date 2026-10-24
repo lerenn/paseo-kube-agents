@@ -1,0 +1,310 @@
+import { describe, expect, it } from "vitest";
+import { KubernetesRuntime } from "../server/runtime.js";
+import { PodRegistry } from "../server/registry.js";
+import type { WorkspaceRuntimeRegistration } from "../server/runtime-types.js";
+import { ConfigSchema } from "../shared/settings.js";
+import { FakeKube, fakeSeeder } from "./fakes.js";
+
+const MIN = 60_000;
+const CWD = "/home/me/repo";
+const repo = async () => ({ url: "https://github.com/lerenn/x.git", branch: "main" });
+
+function setup(settings: object = {}, extra: object = {}, kube = new FakeKube()) {
+  const registry = new PodRegistry();
+  const notices: [string, string | undefined][] = [];
+  let clock = 1_000_000;
+  const runtime = new KubernetesRuntime({
+    getConfig: async () => ConfigSchema.parse({ readyTimeoutSeconds: 1, ...settings }),
+    kubeFor: () => kube,
+    daemonId: "srv_ME",
+    registry,
+    seeder: fakeSeeder,
+    detectRepo: repo,
+    sleep: async () => undefined,
+    now: () => clock++, // every read moves the clock a little, so a pod that never becomes ready times out
+    ticker: () => () => undefined,
+    log: () => undefined,
+    ...extra,
+  });
+  const reg: WorkspaceRuntimeRegistration = runtime.registration();
+  const ctx = { notice: (m: string, l?: "info" | "warning" | "error") => void notices.push([m, l]), signal: new AbortController().signal };
+  const options = { cwd: CWD, slug: "brave-otter-12", ref: null };
+  const base = { workspaceId: "wks_1", options };
+  const prepare = (over: object = {}) => reg.prepare!({ ...base, purpose: "session", argv: ["claude", "--print"], env: { PASEO_AGENT_ID: "a1" }, ...over } as never, ctx);
+  return {
+    kube, runtime, reg, registry, notices, ctx, base, options, prepare,
+    advance: (ms: number) => void (clock += ms),
+    tick: async () => { await runtime.checkIdle(); },
+    activity: (activity: string, agentId = "a1") => reg.onActivity!({ ...base, agentId, activity } as never),
+  };
+}
+
+describe("registration", () => {
+  it("is the kubernetes runtime with pipes and no pty, and creating a workspace touches nothing in the cluster", async () => {
+    const t = setup();
+    expect(t.reg.id).toBe("kubernetes");
+    expect(t.reg.label).toBe("Kubernetes Runtime");
+    expect(await t.reg.describe()).toEqual({ protocolVersion: 1, capabilities: { pipes: true, pty: false } });
+    await t.reg.create!(t.base, t.ctx);
+    expect(t.kube.calls).toEqual([]);
+  });
+
+  it("rejects options it cannot use", async () => {
+    const t = setup();
+    await expect(t.reg.create!({ workspaceId: "w", options: { cwd: "relative" } }, t.ctx)).rejects.toThrow(/no usable Kubernetes runtime options/);
+    await expect(t.reg.create!({ workspaceId: "w", options: { cwd: "/workspace" } }, t.ctx)).rejects.toThrow(/Pick a project directory/);
+    await expect(t.reg.create!({ workspaceId: "w" }, t.ctx)).rejects.toThrow();
+  });
+});
+
+describe("prepare: the pod is created when the first process is about to start", () => {
+  it("creates a labelled sandbox that shows the checkout at the daemon's own path, then seeds it from a bundle", async () => {
+    const t = setup();
+    await t.prepare();
+    const sandbox = t.kube.applied[0] as any;
+    expect(sandbox.metadata.name).toMatch(/^pka-x-brave-otter-12-[0-9a-f]{6}$/);
+    expect(sandbox.metadata.labels).toMatchObject({ "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace": "wks_1" });
+    expect(sandbox.metadata.annotations["paseo.sh/cwd"]).toBe(CWD);
+    expect(sandbox.spec.volumeClaimTemplates[0].metadata.labels).toMatchObject({ "paseo.sh/workspace": "wks_1" });
+    const mounts = sandbox.spec.podTemplate.spec.containers[0].volumeMounts;
+    expect(mounts).toContainEqual({ name: "workspace", mountPath: "/workspace" });
+    expect(mounts).toContainEqual({ name: "workspace", mountPath: CWD, subPath: "checkout" }); // same absolute path as on the daemon
+    expect(sandbox.spec.podTemplate.spec.initContainers[0].name).toBe("volume-init"); // makes the subPath writable for the agent user
+    expect(sandbox.spec.shutdownTime).toBeUndefined(); // storage goes only on archive
+    const seed = t.kube.execs.find((e) => e.argv[2]?.includes("git init"))!;
+    expect(seed.argv[4]).toBe(CWD); // seeded where the daemon's path is
+    expect(t.notices.map((n) => n[0])).toEqual(expect.arrayContaining(["Starting the pod...", "Copying the project into the pod..."]));
+    expect(t.registry.list()[0]).toMatchObject({ workspaceId: "wks_1", state: "running" });
+  });
+
+  it("does nothing the second time: the pod is already ready", async () => {
+    const t = setup();
+    await t.prepare();
+    const before = t.kube.calls.length;
+    await t.prepare();
+    expect(t.kube.calls.slice(before).filter((c) => c !== "pod:" + t.registry.list()[0]!.sandbox)).toEqual([]);
+    expect(t.kube.applied).toHaveLength(1);
+  });
+
+  it("serializes concurrent prepares into one pod", async () => {
+    const t = setup();
+    await Promise.all([t.prepare(), t.prepare(), t.prepare()]);
+    expect(t.kube.applied).toHaveLength(1);
+  });
+
+  it("tunnels the loopback ports of the agent's MCP servers, and widens the tunnel when a later agent needs more", async () => {
+    const t = setup();
+    await t.prepare({ mcpServers: { inbox: { type: "http", url: "http://127.0.0.1:47825/mcp" }, remote: { type: "http", url: "https://example.com/mcp" } } });
+    expect(t.kube.streams[0]!.argv.at(-1)).toBe("47825");
+    await t.prepare({ mcpServers: { leases: { type: "http", url: "http://localhost:47826/mcp" } }, env: { PASEO_GITHUB_PROXY_URL: "http://127.0.0.1:47821" } });
+    expect(t.kube.streams.at(-1)!.argv.at(-1)).toBe("47825,47826,47821");
+    expect(t.kube.streams).toHaveLength(2);
+  });
+
+  it("installs claude or codex on first use when the image lacks them; any other missing command is a clear error", async () => {
+    const t = setup();
+    let missing = true;
+    const exec = t.kube.exec.bind(t.kube);
+    t.kube.exec = async (pod: string, argv: string[]) => (argv[2]?.includes("command -v") && missing ? { code: 1, stdout: "", stderr: "" } : exec(pod, argv));
+    await t.prepare();
+    expect(t.kube.execs.some((e) => e.argv[2]?.includes("npm install") && e.argv[4] === "@anthropic-ai/claude-code")).toBe(true);
+    await expect(t.prepare({ argv: ["mystery-agent"] })).rejects.toThrow(/mystery-agent is not in the pod image/);
+    missing = false;
+  });
+
+  it("explains a pod that cannot be scheduled, leaves the sandbox suspended and retries on the next prepare", async () => {
+    const t = setup();
+    t.kube.pods = [{ uid: "u", ready: false, terminating: false, problem: "Pod cannot be scheduled: no capacity" }];
+    await expect(t.prepare()).rejects.toThrow(/could not start the pod: .*no capacity/s);
+    expect(t.notices.some(([m, l]) => m.includes("no capacity") && l === "warning")).toBe(true);
+    expect(t.notices.some(([m, l]) => m.startsWith("Could not start the pod") && l === "error")).toBe(true);
+    expect(t.kube.patches2.at(-1)!.patch.spec.operatingMode).toBe("Suspended");
+    t.kube.pods = [{ uid: "ok", ready: true, terminating: false }];
+    await t.prepare();
+    expect(t.kube.applied).toHaveLength(1); // the same sandbox is resumed, not a second one
+    expect(t.kube.patches2.some((p) => p.patch.spec?.operatingMode === "Running")).toBe(true);
+  });
+});
+
+describe("exec: real provider processes in the pod", () => {
+  it("starts exactly the provider's command, in the daemon's directory, with an env file holding only the delta", async () => {
+    const t = setup();
+    const proc = await t.reg.exec({ ...t.base, purpose: "session", argv: ["claude", "--print", "--x"], cwd: CWD, env: { PASEO_AGENT_ID: "a1", MODE: "it's quoted" } } as never, t.ctx);
+    const spawned = t.kube.procs[0]!;
+    expect(spawned.argv.slice(0, 3)).toEqual(["sh", "-c", expect.stringContaining('exec "$@"')]);
+    expect(spawned.argv.slice(-4)).toEqual([CWD, "claude", "--print", "--x"]);
+    const envPath = spawned.argv[4]!;
+    expect(envPath).toMatch(/\/\.home\/\.exec-env\/[0-9a-f]{12}$/);
+    const written = t.kube.inputs.find((i) => i.argv.includes(".exec-env/" + envPath.split("/").at(-1)));
+    expect(written).toBeDefined();
+    // data flows both ways
+    spawned.stdout.write("out");
+    expect((await new Promise<Buffer>((r) => proc.stdout.once("data", r))).toString()).toBe("out");
+    proc.stdin.write("in");
+    expect((await new Promise<Buffer>((r) => spawned.stdin.once("data", r))).toString()).toBe("in");
+  });
+
+  it("refuses probes: they stay on the daemon host", async () => {
+    const t = setup();
+    await expect(t.reg.exec({ ...t.base, purpose: "probe", argv: ["claude", "--version"], env: {} } as never, t.ctx)).rejects.toThrow(/Probes run on the daemon host/);
+    expect(t.kube.calls).toEqual([]);
+  });
+
+  it("reports a normal exit as exited, and an exec that ends because the pod went away as runtime-lost", async () => {
+    const t = setup();
+    const a = await t.reg.exec({ ...t.base, purpose: "session", argv: ["claude"], env: {} } as never, t.ctx);
+    t.kube.procs[0]!.end(0);
+    expect(await a.exit).toMatchObject({ code: 0, reason: "exited" });
+
+    const b = await t.reg.exec({ ...t.base, purpose: "session", argv: ["claude"], env: {} } as never, t.ctx);
+    t.kube.procs[1]!.end(2);
+    expect(await b.exit).toMatchObject({ code: 2, reason: "exited" }); // the pod is fine: the process failed
+
+    const c = await t.reg.exec({ ...t.base, purpose: "session", argv: ["claude"], env: {} } as never, t.ctx);
+    t.kube.pods = [{ uid: "x", ready: false, terminating: true }];
+    t.kube.procs[2]!.end(137);
+    expect(await c.exit).toMatchObject({ reason: "runtime-lost", message: expect.stringContaining("next message brings it back") });
+  });
+
+  it("stops the process when Paseo aborts the launch or signals it", async () => {
+    const t = setup();
+    const abort = new AbortController();
+    const proc = await t.reg.exec({ ...t.base, purpose: "session", argv: ["claude"], env: {} } as never, { ...t.ctx, signal: abort.signal });
+    await proc.signal("SIGINT");
+    abort.abort();
+    expect(t.kube.procs[0]!.killed).toEqual(["SIGINT", "SIGTERM"]);
+  });
+});
+
+describe("suspend, resume and destroy", () => {
+  it("suspends a workspace whose agents have all been idle, keeping the volume and giving it no expiry", async () => {
+    const t = setup({ podIdleMinutes: 30 });
+    await t.prepare();
+    t.advance(29 * MIN);
+    await t.tick();
+    expect(t.registry.list()[0]!.state).toBe("running");
+    t.advance(2 * MIN);
+    await t.tick();
+    expect(t.kube.patches2.at(-1)!.patch).toEqual({ spec: { operatingMode: "Suspended" } });
+    expect(t.registry.list()[0]!.state).toBe("suspended");
+    expect(t.kube.calls.filter((c) => c.startsWith("delete:"))).toEqual([]);
+  });
+
+  it("does not suspend while any agent has a turn running or a permission pending, or when disabled", async () => {
+    const t = setup({ podIdleMinutes: 30 });
+    await t.prepare();
+    t.activity("turn_started");
+    t.advance(2 * 60 * MIN);
+    await t.tick();
+    expect(t.registry.list()[0]!.state).toBe("running");
+    t.activity("turn_ended");
+    t.activity("permission_requested", "a2");
+    t.advance(2 * 60 * MIN);
+    await t.tick();
+    expect(t.registry.list()[0]!.state).toBe("running");
+    t.activity("permission_resolved", "a2");
+    t.advance(31 * MIN);
+    await t.tick();
+    expect(t.registry.list()[0]!.state).toBe("suspended");
+    for (const settings of [{ podIdleMinutes: 0 }, { storage: { mode: "ephemeral", size: "10Gi" } }]) {
+      const off = setup(settings);
+      await off.prepare();
+      off.advance(24 * 60 * MIN);
+      await off.tick();
+      expect(off.registry.list()[0]!.state).toBe("running");
+    }
+  });
+
+  it("input counts as activity", async () => {
+    const t = setup({ podIdleMinutes: 30 });
+    await t.prepare();
+    t.advance(25 * MIN);
+    t.activity("input");
+    t.advance(25 * MIN);
+    await t.tick();
+    expect(t.registry.list()[0]!.state).toBe("running");
+  });
+
+  it("beforeInput resumes a suspended workspace on the same volume, with the current image, without reseeding", async () => {
+    const t = setup({ podIdleMinutes: 30, image: "node:23" });
+    await t.prepare();
+    t.advance(31 * MIN);
+    await t.tick();
+    const seeds = () => t.kube.execs.filter((e) => e.argv[2]?.includes("git init")).length;
+    const before = seeds();
+    t.kube.hasClone = true;
+    await t.reg.beforeInput!({ ...t.base, agentId: "a1" }, t.ctx);
+    const resume = t.kube.patches2.filter((p) => p.patch.spec?.operatingMode === "Running").at(-1)!.patch;
+    expect(resume.spec.podTemplate.spec.containers[0].image).toBe("node:23");
+    expect(seeds()).toBe(before);
+    expect(t.registry.list()[0]!.state).toBe("running");
+    expect(t.notices.map((n) => n[0])).toContain("Resuming the pod...");
+  });
+
+  it("beforeInput on a running workspace changes nothing", async () => {
+    const t = setup();
+    await t.prepare();
+    const calls = t.kube.calls.length;
+    await t.reg.beforeInput!({ ...t.base, agentId: "a1" }, t.ctx);
+    expect(t.kube.calls.length).toBe(calls);
+  });
+
+  it("queues inputs that arrive during a resume behind it, with one resume", async () => {
+    const t = setup({ podIdleMinutes: 30 });
+    await t.prepare();
+    t.advance(31 * MIN);
+    await t.tick();
+    await Promise.all([1, 2, 3].map(() => t.reg.beforeInput!({ ...t.base, agentId: "a1" }, t.ctx)));
+    expect(t.kube.patches2.filter((p) => p.patch.spec?.operatingMode === "Running")).toHaveLength(1);
+  });
+
+  it("destroy removes this workspace's sandbox and volume claim, and only that", async () => {
+    const t = setup();
+    await t.prepare();
+    await t.reg.prepare!({ workspaceId: "wks_2", options: { cwd: "/home/me/other" }, purpose: "session", argv: ["claude"], env: {} } as never, t.ctx);
+    const first = (t.kube.applied[0] as any).metadata.name;
+    await t.reg.destroy!(t.base, t.ctx);
+    expect(t.kube.calls.filter((c) => c.startsWith("delete:"))).toEqual([`delete:sandbox/${first}`, `delete:pvc/workspace-${first}`]);
+    expect(t.registry.list().map((p) => p.workspaceId)).toEqual(["wks_2"]);
+    await expect(t.reg.destroy!({ workspaceId: "wks_unknown", options: { cwd: CWD } }, t.ctx)).resolves.toBeUndefined();
+  });
+
+  it("reconcile forgets what was set up in a lost pod, so the next launch sets up the replacement", async () => {
+    const t = setup();
+    await t.prepare();
+    const installs = () => t.kube.inputs.filter((i) => i.argv[4] === "bridge.mjs").length;
+    expect(installs()).toBe(1);
+    await t.reg.reconcile!(t.ctx);
+    t.kube.pods = [{ uid: "replacement", ready: true, terminating: false }];
+    await t.prepare();
+    expect(installs()).toBe(2);
+    expect(t.kube.streams).toHaveLength(2); // a new bridge
+  });
+
+  it("picks up the workspaces a previous plugin run left, so idle ones are suspended after a restart", async () => {
+    const kube = new FakeKube();
+    kube.sandboxes = [
+      { name: "pka-old-1", labels: { "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace": "wks_old" }, annotations: { "paseo.sh/cwd": "/home/me/old" }, operatingMode: "Running" },
+      { name: "pka-other", labels: { "paseo.sh/daemon": "srv_OTHER", "paseo.sh/workspace": "wks_x" }, annotations: { "paseo.sh/cwd": "/x" }, operatingMode: "Running" },
+    ];
+    const t = setup({ podIdleMinutes: 30 }, {}, kube);
+    await t.runtime.start();
+    expect(t.registry.list().map((p) => p.workspaceId)).toEqual(["wks_old"]); // never another daemon's
+    t.advance(31 * MIN);
+    await t.tick();
+    expect(kube.patches2.at(-1)).toMatchObject({ name: "pka-old-1", patch: { spec: { operatingMode: "Suspended" } } });
+  });
+
+  it("inspect reports absent, running, resuming and suspended", async () => {
+    const t = setup({ podIdleMinutes: 30 });
+    expect(await t.reg.inspect!(t.base, t.ctx)).toEqual({ state: "absent" });
+    await t.prepare();
+    expect(await t.reg.inspect!(t.base, t.ctx)).toEqual({ state: "running" });
+    t.kube.pods = [{ uid: "u", ready: false, terminating: false, problem: "Pod cannot be scheduled: no capacity" }];
+    expect(await t.reg.inspect!(t.base, t.ctx)).toEqual({ state: "resuming", message: "Pod cannot be scheduled: no capacity" });
+    t.kube.pods = [{ uid: "u", ready: true, terminating: false }];
+    t.advance(31 * MIN);
+    await t.tick();
+    expect(await t.reg.inspect!(t.base, t.ctx)).toEqual({ state: "suspended" });
+  });
+});
