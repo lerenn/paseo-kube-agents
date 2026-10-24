@@ -232,8 +232,10 @@ export class KubernetesRuntime {
     if (head?.code === 0) all.push(head.stdout.trim());
     const seeded = shas.length ? null : await kube.exec(pod, ["cat", `${HOME_DIR}/seed.sha`]).catch(() => null);
     if (seeded?.code === 0 && seeded.stdout.trim()) all.push(seeded.stdout.trim());
-    const repo = await (this.deps.detectRepo ?? detectRepo)(cwd);
-    ws.targets = await fetchTargets(this.git, cwd, repo.url, all);
+    // the project's own remote URL, not the https form the pod is told about: the daemon fetches with its own credentials
+    const raw = await this.git(["remote", "get-url", "origin"], { cwd }).catch(() => null);
+    const originUrl = raw?.code === 0 && raw.stdout.trim() ? raw.stdout.trim() : (await (this.deps.detectRepo ?? detectRepo)(cwd)).url;
+    ws.targets = await fetchTargets(this.git, cwd, originUrl, all);
     await setupMirrors(kube, pod, cwd, ws.targets);
   }
 

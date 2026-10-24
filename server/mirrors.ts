@@ -65,10 +65,13 @@ export async function fetchTargets(
     { id: mirrorId(normalize(originUrl)), podUrls: [...new Set([originHttps, originUrl])], daemonUrl: originUrl, origin: true },
   ];
   for (const raw of await submoduleUrls(git, cwd, shas)) {
-    const resolved = resolveSubmoduleUrl(originHttps, raw);
+    // the daemon fetches the way the project is configured (ssh stays ssh, so the right key is used); the pod
+    // may name the submodule either way
+    const resolved = resolveSubmoduleUrl(originUrl, raw);
     const id = mirrorId(normalize(resolved));
     if (targets.some((t) => t.id === id)) continue;
-    targets.push({ id, podUrls: [...new Set([resolved, toHttpsRemote(resolved)])], daemonUrl: resolved, origin: false });
+    const viaHttps = resolveSubmoduleUrl(originHttps, raw);
+    targets.push({ id, podUrls: [...new Set([resolved, toHttpsRemote(resolved), viaHttps])], daemonUrl: resolved, origin: false });
   }
   return targets;
 }
