@@ -541,6 +541,7 @@ export async function connectKube(
 
   async function open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     const { sessionId, config: session } = input;
+    console.log(`[kube-agents] opening session persist=${session.persist} history=${input.history} resumed=${Boolean(input.persistence)}`);
     const repo = await (deps.detectRepo ?? detectRepo)(session.cwd);
     const plan = parseClonePlan(session.env);
     const { toolPolicy: _unenforceable, ...forwarded } = session;
