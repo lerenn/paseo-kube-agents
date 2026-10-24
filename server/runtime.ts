@@ -4,7 +4,7 @@ import { parseRuntimeOptions, type RuntimeOptions } from "../shared/runtime-opti
 import { applyFetch, fetchTargets, type FetchTarget } from "./mirrors.js";
 import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
 import type { KubernetesRuntimeConfig } from "./config.js";
-import { type GitRunner, runGit } from "./git.js";
+import { type GitRunner, runGit, scrub } from "./git.js";
 import type { Kube, SandboxInfo } from "./kube.js";
 import { LAUNCH_SCRIPT } from "./pod-assets.js";
 import { ensureCommand, initSubmodules, installAssets, seedWorkspace, setupMirrors, writeEnvFile } from "./pod-setup.js";
@@ -532,6 +532,10 @@ export class KubernetesRuntime {
     const proc = kube.spawnExec(pod, ["sh", "-c", LAUNCH_SCRIPT, "sh", envPath, cwd, ...request.argv]);
     const abort = () => proc.kill();
     ctx.signal.addEventListener("abort", abort, { once: true });
+    let stderrTail = "";
+    proc.stderr.on("data", (chunk: Buffer | string) => {
+      stderrTail = (stderrTail + chunk.toString()).slice(-1500);
+    });
     return {
       stdin: proc.stdin,
       stdout: proc.stdout,
@@ -542,6 +546,9 @@ export class KubernetesRuntime {
         // An exec that ends because the pod went away is the runtime's doing, not the process finishing.
         const info = await kube.podInfo(pod).catch(() => null);
         const lost = ws.phase === "suspended" || !info || !info.ready || info.terminating;
+        if (code !== 0 && !lost) {
+          this.log(`[kubernetes-runtime] ${request.argv[0]} in ${pod} exited with ${code ?? signal}${stderrTail.trim() ? `: ${scrub(stderrTail.trim())}` : ""}`);
+        }
         if (lost && code !== 0) {
           return { code, signal, reason: "runtime-lost" as const, message: "The pod was suspended or lost; the next message brings it back" };
         }
