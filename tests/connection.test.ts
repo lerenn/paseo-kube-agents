@@ -145,7 +145,7 @@ describe("kube connection", () => {
     }
     await conn.close();
     expect(kube.calls.filter((c) => c.startsWith("delete:"))).toHaveLength(0);
-    const suspends = kube.patches2.filter((x) => x.patch.spec.operatingMode === "Suspended");
+    const suspends = kube.patches2.filter((x) => x.patch.spec?.operatingMode === "Suspended");
     expect(suspends).toHaveLength(2);
     expect(Date.parse(suspends[0]!.patch.spec.shutdownTime) - Date.now()).toBeGreaterThan(7 * 24 * 3600 * 1000);
   });
@@ -156,7 +156,7 @@ describe("kube connection", () => {
     await conn.send({ type: "session.open", requestId: "d", sessionId: "draft", config: sessionConfig(), history: "skip" });
     await conn.close();
     expect(kube.calls.filter((c) => c.startsWith("delete:sandbox/"))).toHaveLength(1);
-    expect(kube.patches2.filter((x) => x.patch.spec.operatingMode === "Suspended")).toHaveLength(0);
+    expect(kube.patches2.filter((x) => x.patch.spec?.operatingMode === "Suspended")).toHaveLength(0);
   });
 
   it("deletes every pod when the connection closes and the workspace is ephemeral", async () => {

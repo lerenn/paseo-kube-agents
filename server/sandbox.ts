@@ -21,6 +21,15 @@ export function sandboxName(sessionId: string, repo?: string, slug?: string): st
 
 export const SESSION_LABEL = "paseo.sh/session";
 export const POOL_LABEL = "paseo.sh/pool";
+/** The agent's own session handle (stable across Paseo reopening the session under a new id). */
+export const NATIVE_LABEL = "paseo.sh/native";
+
+export function nativeSessionId(persistence: { data?: unknown } | undefined): string | undefined {
+  const data = persistence?.data;
+  return data && typeof data === "object" && typeof (data as { sessionId?: unknown }).sessionId === "string"
+    ? (data as { sessionId: string }).sessionId
+    : undefined;
+}
 export const SPEC_HASH_ANNOTATION = "paseo.sh/spec-hash";
 /** A suspended agent's volume is kept this long, so it can be resumed days later. */
 export const SUSPENDED_RETENTION_HOURS = 14 * 24;

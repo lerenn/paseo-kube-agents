@@ -13,7 +13,7 @@ import type { AcpConnector } from "@getpaseo/plugin/server/acp";
 import type { KubeAgentsConfig } from "./config.js";
 import type { Kube } from "./kube.js";
 import { PodRegistry, type PodState } from "./registry.js";
-import { SESSION_LABEL, buildSandbox, resumePatch, sandboxName, sessionLabel, suspendPatch, workspaceClaimName } from "./sandbox.js";
+import { NATIVE_LABEL, SESSION_LABEL, buildSandbox, nativeSessionId, resumePatch, sandboxName, sessionLabel, suspendPatch, workspaceClaimName } from "./sandbox.js";
 import { REF_ENV_KEYS } from "../shared/pod-ref.js";
 import { createCatalogSource } from "./catalog.js";
 import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
@@ -94,6 +94,8 @@ interface PodSession {
   stopForwarding: () => void;
   /** The agent's own session handle, so a replacement pod can resume the conversation. */
   persistence?: ProviderPersistence;
+  /** The native session id already written to the sandbox label. */
+  nativeLabelled?: string;
   turnId?: string;
   /** Running, suspended (pod deleted, volume kept) or coming back. */
   state: PodState;
@@ -234,10 +236,19 @@ export async function connectKube(
     return inner;
   }
 
+  /** Keeps the agent's handle, and labels the sandbox with it so a reopened session (new Paseo id) finds it. */
+  function remember(ps: PodSession, persistence: ProviderPersistence): void {
+    ps.persistence = persistence;
+    const native = nativeSessionId(persistence);
+    if (!native || ps.nativeLabelled === native) return;
+    ps.nativeLabelled = native;
+    void kube.patchSandbox(ps.sandbox, { metadata: { labels: { [NATIVE_LABEL]: sessionLabel(native) } } }).catch(() => undefined);
+  }
+
   function onInnerEvent(sessionId: string, ps: PodSession, inner: ProviderConnection, event: ProviderEvent) {
     if (inner !== ps.inner) return;
-    if (event.type === "session.opened" && event.persistence) ps.persistence = event.persistence;
-    if (event.type === "session.persistence" && event.sessionId === sessionId) ps.persistence = event.persistence;
+    if (event.type === "session.opened" && event.persistence) remember(ps, event.persistence);
+    if (event.type === "session.persistence" && event.sessionId === sessionId) remember(ps, event.persistence);
     if (event.type === "session.turn" && event.sessionId === sessionId) {
       ps.turnId = event.state === "started" ? event.turnId : undefined;
       ps.lastActivity = now();
@@ -365,6 +376,7 @@ export async function connectKube(
       }
     }
   }
+  if (persistent && config.podIdleMinutes > 0) console.log(`[kube-agents] idle suspension on: pods idle ${config.podIdleMinutes} min are suspended`);
   const stopTicker = (deps.ticker ?? ((fn, ms) => {
     const timer = setInterval(fn, ms) as unknown as NodeJS.Timeout;
     timer.unref?.();
@@ -423,7 +435,10 @@ export async function connectKube(
 
     // The agent may already have a sandbox: the plugin restarted, or the agent was suspended. Adopt it,
     // so its volume (workspace and the agent's own session state) comes back with it.
-    const existing = (await kube.listSandboxes(`${SESSION_LABEL}=${sessionLabel(sessionId)}`).catch(() => []))[0];
+    const native = nativeSessionId(input.persistence);
+    const existing =
+      (await kube.listSandboxes(`${SESSION_LABEL}=${sessionLabel(sessionId)}`).catch(() => []))[0] ??
+      (native ? (await kube.listSandboxes(`${NATIVE_LABEL}=${sessionLabel(native)}`).catch(() => []))[0] : undefined);
     let name: string;
     let created = false;
     if (existing) {
