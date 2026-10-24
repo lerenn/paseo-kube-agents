@@ -46,9 +46,9 @@ const REFRESH_MS = 30_000;
  */
 export const POD_AGENT_PROVIDER = "kube-agents/default";
 
-/** GitHub token plus the Claude OAuth token: without both, a pod agent cannot clone or run. */
+/** The Claude OAuth token: without it a pod agent cannot run. GitHub access needs no pod credential. */
 export function credentialsReady(set: Record<string, boolean>): boolean {
-  return set.GH_TOKEN === true && set.CLAUDE_CODE_OAUTH_TOKEN === true;
+  return set.CLAUDE_CODE_OAUTH_TOKEN === true;
 }
 
 /** Registers "Pod" in the New workspace dropdown. Returns a cleanup; a no-op without the fork API. */
@@ -83,7 +83,7 @@ export function contributePodLocation(client: PluginClientContext): () => void {
     async createWorkspace({ project, idempotencyKey, prompt, slug, ref }) {
       const status = await client.rpc(credentialsStatus, {});
       if (!credentialsReady(status.set)) {
-        throw new Error("Set GH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN in the Kube Agents screen first.");
+        throw new Error("Set CLAUDE_CODE_OAUTH_TOKEN in the Kube Agents screen first.");
       }
       const workspace = await client.paseo.workspaces.create({
         source: { kind: "directory", path: project.directory, projectId: project.id },
@@ -92,7 +92,8 @@ export function contributePodLocation(client: PluginClientContext): () => void {
       });
       const agent = await workspace.agents.create({
         config: { provider: POD_AGENT_PROVIDER },
-        env: refEnv(ref, slug),
+        // Opts the pod agent into the GitHub Proxy plugin (if installed), its only route to GitHub.
+        env: { PASEO_GITHUB_PROXY: "on", ...refEnv(ref, slug) },
         prompt,
         idempotencyKey,
       });

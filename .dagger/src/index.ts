@@ -11,7 +11,7 @@ export class Ci {
   base(@argument({ defaultPath: "/", ignore: ["node_modules", ".git", ".dagger/sdk"] }) source: Directory): Container {
     return dag
       .container()
-      .from("node:22-slim")
+      .from("node:22-bookworm")
       .withMountedCache("/root/.npm", dag.cacheVolume("npm"))
       .withDirectory("/src", source)
       .withWorkdir("/src")

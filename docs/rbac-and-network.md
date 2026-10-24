@@ -65,8 +65,7 @@ env vars in every agent pod:
 
 | key | use |
 | --- | --- |
-| `GH_TOKEN` | `git clone` (credential helper) and `gh`; a fine-grained token scoped to the repos agents may touch |
-| `CLAUDE_CODE_OAUTH_TOKEN` | claude (from `claude setup-token`) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | claude (from `claude setup-token`); the only key pods read, by reference |
 
 The Secret is `optional` in the pod spec so the pod still starts without it.
 
@@ -87,4 +86,6 @@ spec:
       ports: [{port: 443, protocol: TCP}]   # github.com, api.anthropic.com, api.openai.com, npm, Go proxy
 ```
 
-Adjust the `except` list to the cluster's pod/service/VPC CIDRs. SSH (22) is not needed: clones use https.
+Pods need no GitHub egress: seeding and pushing go through the daemon over `pods/exec`, so GitHub (and the MCP
+servers on the daemon) are never reached from the pod network. 443 egress is still needed for the Claude API and for
+npm (the agent adapter). Adjust the `except` list to the cluster's pod/service/VPC CIDRs. SSH (22) is not needed: clones use https.

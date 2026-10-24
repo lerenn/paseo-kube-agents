@@ -5,7 +5,7 @@ import { connectKube } from "../server/connection.js";
 import { parsePodInfo } from "../server/kube.js";
 import { waitPodReady } from "../server/pod-wait.js";
 import { buildSandbox, workspaceClaimName } from "../server/sandbox.js";
-import { FakeAcp, FakeKube } from "./fakes.js";
+import { FakeAcp, FakeKube, fakeSeeder } from "./fakes.js";
 
 const manifest = (storage?: object) => {
   const config = ConfigSchema.parse(storage ? { storage } : {});
@@ -38,7 +38,7 @@ describe("workspace storage manifest", () => {
 
   it("keeps HOME on the volume so the agent's session state survives a pod restart", () => {
     const c = manifest().spec.podTemplate.spec.containers[0];
-    expect(c.env).toEqual([{ name: "HOME", value: "/workspace/.home" }]);
+    expect(c.env[0]).toEqual({ name: "HOME", value: "/workspace/.home" });
     expect(c.command.join(" ")).toContain("mkdir -p");
   });
 
@@ -107,7 +107,7 @@ describe("pod loss recovery", () => {
     let t = 0;
     const conn = await connectKube(
       { versions: [1], capabilities: ["prompt.message"] },
-      { config: ConfigSchema.parse(storage ? { storage } : {}), kube, acpProvider: acp.provider, detectRepo: repo, sleep: async () => undefined, now: () => (t += 1000) },
+      { config: ConfigSchema.parse(storage ? { storage } : {}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: () => (t += 1000) },
     );
     conn.onEvent((e) => events.push(e));
     await conn.send({ type: "session.open", requestId: "r1", sessionId: "s1", config: cfg(), history: "skip" });
@@ -143,7 +143,7 @@ describe("pod loss recovery", () => {
     let t = 0;
     const conn = await connectKube(
       { versions: [1], capabilities: ["prompt.message", "permission.tool_policy"] },
-      { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, sleep: async () => undefined, now: () => (t += 1000) },
+      { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: () => (t += 1000) },
     );
     await conn.send({
       type: "session.open", requestId: "r", sessionId: "s1",

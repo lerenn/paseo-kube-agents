@@ -36,7 +36,7 @@ function fakeClient(set: Record<string, boolean>, withApi = true) {
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
-const ready = { GH_TOKEN: true, CLAUDE_CODE_OAUTH_TOKEN: true };
+const ready = { CLAUDE_CODE_OAUTH_TOKEN: true };
 
 describe("pod workspace location", () => {
   it("is a no-op, without crashing, on a Paseo without addWorkspaceLocation", () => {
@@ -97,15 +97,15 @@ describe("pod workspace location", () => {
   });
 
   it("refuses to create when credentials are missing", async () => {
-    const { client, registered, created } = fakeClient({ ...ready, GH_TOKEN: false });
+    const { client, registered, created } = fakeClient({ CLAUDE_CODE_OAUTH_TOKEN: false });
     contributePodLocation(client);
     await expect(registered[0].createWorkspace({ hostId: "h", project, settings: "default", idempotencyKey: "k", prompt: "", slug: "s", ref: null })).rejects.toThrow(/Kube Agents screen/);
     expect(created.workspace).toHaveLength(0);
   });
 
   it("normalizes the settings value and credential readiness", () => {
-    expect(credentialsReady({ GH_TOKEN: true, CLAUDE_CODE_OAUTH_TOKEN: true })).toBe(true);
-    expect(credentialsReady({ GH_TOKEN: true })).toBe(false);
-    expect(credentialsReady({ CLAUDE_CODE_OAUTH_TOKEN: true })).toBe(false);
+    expect(credentialsReady({ CLAUDE_CODE_OAUTH_TOKEN: true })).toBe(true);
+    expect(credentialsReady({})).toBe(false); // GitHub needs no pod credential
+    expect(credentialsReady({ CLAUDE_CODE_OAUTH_TOKEN: false })).toBe(false);
   });
 });

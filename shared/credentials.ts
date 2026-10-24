@@ -3,7 +3,6 @@ import { z } from "zod";
 
 /** Env vars the UI may write into the credentials Secret. Values are write-only. */
 export const CREDENTIAL_KEYS = [
-  "GH_TOKEN",
   "CLAUDE_CODE_OAUTH_TOKEN",
 ] as const;
 

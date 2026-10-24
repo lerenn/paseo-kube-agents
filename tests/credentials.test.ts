@@ -9,11 +9,11 @@ const statePath = () => join(mkdtempSync(join(tmpdir(), "kube-cred-")), "state.j
 
 describe("credentials", () => {
   it("builds a server-side-apply manifest with a base64 value and no get needed", () => {
-    expect(JSON.parse(secretApply("paseo-agent-credentials", "paseo-agents", "GH_TOKEN", "ghp_x"))).toEqual({
+    expect(JSON.parse(secretApply("paseo-agent-credentials", "paseo-agents", "CLAUDE_CODE_OAUTH_TOKEN", "ghp_x"))).toEqual({
       apiVersion: "v1",
       kind: "Secret",
       metadata: { name: "paseo-agent-credentials", namespace: "paseo-agents" },
-      data: { GH_TOKEN: Buffer.from("ghp_x").toString("base64") },
+      data: { CLAUDE_CODE_OAUTH_TOKEN: Buffer.from("ghp_x").toString("base64") },
     });
   });
 
@@ -26,9 +26,9 @@ describe("credentials", () => {
         return { code: 0, stdout: "", stderr: "" };
       }
     }
-    const manifest = secretApply("s", "paseo-agents", "GH_TOKEN", "s3cr3t-v4lue");
-    await new Spy({ namespace: "paseo-agents" }).applySecretKey("s", "GH_TOKEN", manifest);
-    expect(calls[0]!.args).toEqual(["apply", "--server-side", "--field-manager=paseo-kube-agents-gh_token", "--force-conflicts", "-f", "-"]);
+    const manifest = secretApply("s", "paseo-agents", "CLAUDE_CODE_OAUTH_TOKEN", "s3cr3t-v4lue");
+    await new Spy({ namespace: "paseo-agents" }).applySecretKey("s", "CLAUDE_CODE_OAUTH_TOKEN", manifest);
+    expect(calls[0]!.args).toEqual(["apply", "--server-side", "--field-manager=paseo-kube-agents-claude_code_oauth_token", "--force-conflicts", "-f", "-"]);
     expect(calls[0]!.args.join(" ")).not.toContain("s3cr3t-v4lue");
     expect(calls[0]!.stdin).toBe(manifest);
   });
@@ -48,7 +48,7 @@ describe("credentials", () => {
 
   it("starts with every key not set", () => {
     expect(readStatus(statePath())).toEqual({
-      GH_TOKEN: false, CLAUDE_CODE_OAUTH_TOKEN: false,
+      CLAUDE_CODE_OAUTH_TOKEN: false,
     });
   });
 
@@ -58,7 +58,6 @@ describe("credentials", () => {
     const status = await setCredential(kube, "paseo-agent-credentials", "CLAUDE_CODE_OAUTH_TOKEN", "sk-secret", path);
     expect(kube.patches[0]!.key).toBe("CLAUDE_CODE_OAUTH_TOKEN");
     expect(status.CLAUDE_CODE_OAUTH_TOKEN).toBe(true);
-    expect(status.GH_TOKEN).toBe(false);
     expect(readFileSync(path, "utf8")).not.toContain("sk-secret");
     expect(statSync(path).mode & 0o777).toBe(0o600);
     expect(readStatus(path).CLAUDE_CODE_OAUTH_TOKEN).toBe(true);
@@ -68,14 +67,14 @@ describe("credentials", () => {
     const kube = new FakeKube();
     kube.patchError = new Error("forbidden: body sk-secret rejected");
     const path = statePath();
-    await expect(setCredential(kube, "s", "GH_TOKEN", "sk-secret", path)).rejects.toThrow(/\*\*\*/);
-    await expect(setCredential(kube, "s", "GH_TOKEN", "sk-secret", path)).rejects.not.toThrow(/sk-secret/);
-    expect(readStatus(path).GH_TOKEN).toBe(false);
+    await expect(setCredential(kube, "s", "CLAUDE_CODE_OAUTH_TOKEN", "sk-secret", path)).rejects.toThrow(/\*\*\*/);
+    await expect(setCredential(kube, "s", "CLAUDE_CODE_OAUTH_TOKEN", "sk-secret", path)).rejects.not.toThrow(/sk-secret/);
+    expect(readStatus(path).CLAUDE_CODE_OAUTH_TOKEN).toBe(false);
   });
 
   it("rejects values with newlines before touching the cluster", async () => {
     const kube = new FakeKube();
-    await expect(setCredential(kube, "s", "GH_TOKEN", "a\nb", statePath())).rejects.toThrow(/newlines/);
+    await expect(setCredential(kube, "s", "CLAUDE_CODE_OAUTH_TOKEN", "a\nb", statePath())).rejects.toThrow(/newlines/);
     expect(kube.patches).toHaveLength(0);
   });
 });

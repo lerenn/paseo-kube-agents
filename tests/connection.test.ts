@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ProviderEvent, ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import { ConfigSchema } from "../server/config.js";
 import { connectKube, isPreapproved } from "../server/connection.js";
-import { FakeAcp, FakeKube } from "./fakes.js";
+import { FakeAcp, FakeKube, fakeSeeder } from "./fakes.js";
 
 const request = { versions: [1], capabilities: ["prompt.message", "permission"] };
 const sessionConfig = (env: Record<string, string> = {}): ProviderSessionConfig => ({
@@ -21,7 +21,7 @@ function setup(overrides: Partial<ReturnType<typeof ConfigSchema.parse>> = {}) {
   const acp = new FakeAcp();
   const config = ConfigSchema.parse({ image: "go:1", ...overrides });
   const events: ProviderEvent[] = [];
-  const conn = connectKube(request, { config, kube, acpProvider: acp.provider, detectRepo: repo, sleep: async () => undefined, now: fakeClock() });
+  const conn = connectKube(request, { config, kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: fakeClock() });
   return { kube, acp, events, conn };
 }
 
@@ -34,9 +34,15 @@ describe("kube connection", () => {
     await conn.send({ type: "session.open", requestId: "r1", sessionId: "s1", config: sessionConfig(), history: "skip" });
     expect(kube.applied).toHaveLength(1);
     const name = (kube.applied[0] as any).metadata.name as string;
-    expect(kube.calls.slice(0, 4)).toEqual(["apply", `pod:${name}`, "exec", "exec"]); // apply, wait for pod, check volume, clone
-    // clone happens in the pod, then the agent sees the pod path, not the daemon path
-    expect(kube.execs[1]!.argv.slice(-3)).toEqual(["main", "https://github.com/lerenn/x", `/workspace/${name}`]);
+    // apply, wait for the pod, write the helper scripts (4 files), check the volume, seed from the bundle
+    expect(kube.calls.slice(0, 8)).toEqual(["apply", `pod:${name}`, "execInput", "execInput", "execInput", "execInput", "exec", "execInput"]);
+    expect(kube.inputs.map((i) => i.argv[4]).slice(0, 4)).toEqual(["bridge.mjs", "bin/gh", "outbox.git/hooks/pre-receive", ".kube-env"]);
+    // the workspace is built from the daemon's bundle (no GitHub clone in the pod), and no token is involved
+    expect(kube.inputs[4]!.argv.join(" ")).toContain("seed.bundle");
+    const seedScript = kube.execs.find((e) => e.argv[2]?.includes("git init"))!;
+    expect(seedScript.argv.slice(4, 7)).toEqual([`/workspace/${name}`, "refs/kube-seed/seed1", "main"]);
+    expect(JSON.stringify(kube.execs)).not.toMatch(/GH_TOKEN|credential\.helper|clone/);
+    // the agent sees the pod path, not the daemon path
     const open = acp.inputs[0] as any;
     expect(open.config.cwd).toBe(`/workspace/${name}`);
     // Paseo sees its own cwd
@@ -44,7 +50,9 @@ describe("kube connection", () => {
 
     // the connector execs the agent command in that pod
     acp.connector!();
-    expect(kube.streams[0]).toEqual({ pod: name, argv: ["claude-agent-acp"] });
+    expect(kube.streams.at(-1)!.pod).toBe(name);
+    expect(kube.streams.at(-1)!.argv.slice(-1)).toEqual(["claude-agent-acp"]);
+    expect(kube.streams.at(-1)!.argv.slice(0, 2)).toEqual(["sh", "-c"]); // wrapper: proxy env and shims on PATH
 
     await conn.send({
       type: "session.prompt", sessionId: "s1",
@@ -67,7 +75,7 @@ describe("kube connection", () => {
     expect(opened.capabilities).toEqual([]); // setup() offers neither prompt.image nor session.persistence
     const full = await connectKube(
       { versions: [1], capabilities: ["prompt.image", "session.persistence"] },
-      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider, detectRepo: repo },
+      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider, detectRepo: repo, seeder: fakeSeeder },
     );
     const seen: ProviderEvent[] = [];
     full.onEvent((e) => seen.push(e));
@@ -203,7 +211,7 @@ describe("kube connection edge cases", () => {
       };
       return reg;
     };
-    const conn = await connectKube(request, { config: ConfigSchema.parse({}), kube, acpProvider: failing, detectRepo: repo, sleep: async () => undefined, now: fakeClock() });
+    const conn = await connectKube(request, { config: ConfigSchema.parse({}), kube, acpProvider: failing, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: fakeClock() });
     conn.onEvent((e) => events.push(e));
     await open(conn, "s");
     expect(events.at(-1)).toMatchObject({ type: "request.failed", error: { message: expect.stringContaining("agent crashed") } });
@@ -235,7 +243,7 @@ describe("kube connection edge cases", () => {
     expect(conn.capabilities).not.toContain("permission.tool_policy"); // request did not offer it
     const offered = await connectKube(
       { versions: [1], capabilities: ["permission", "permission.tool_policy"] },
-      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: acp.provider, detectRepo: repo },
+      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder },
     );
     expect(offered.capabilities).toContain("permission.tool_policy");
     await offered.send({
