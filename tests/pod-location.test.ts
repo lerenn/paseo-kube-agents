@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PluginClientContext } from "@getpaseo/plugin/client";
-import { contributePodLocation, credentialsReady } from "../client/pod-location.js";
+import { contributePodLocation, credentialsReady, podAgentConfig } from "../client/pod-location.js";
 
 const project = { id: "p1", name: "repo", directory: "/home/me/repo" };
 
@@ -101,6 +101,21 @@ describe("pod workspace location", () => {
     contributePodLocation(client);
     await expect(registered[0].createWorkspace({ hostId: "h", project, settings: "default", idempotencyKey: "k", prompt: "", slug: "s", ref: null })).rejects.toThrow(/Kube Agents screen/);
     expect(created.workspace).toHaveLength(0);
+  });
+
+  it("starts the pod agent with the composer's model, thinking level and mode", async () => {
+    const { client, registered, created } = fakeClient(ready);
+    contributePodLocation(client);
+    await registered[0].createWorkspace({
+      hostId: "h", project, settings: undefined, idempotencyKey: "k", prompt: "Hello there!", slug: "happy-blobfish", ref: null,
+      agent: { provider: "claude", model: "claude-opus-5-5", thinkingOptionId: "medium", modeId: "bypassPermissions", featureValues: { fast: true } },
+    });
+    expect(created.agent[0].config).toEqual({ provider: "kube-agents/claude-opus-5-5", thinkingOptionId: "medium", modeId: "bypassPermissions" });
+  });
+
+  it("falls back to the agent default when the composer sent nothing", () => {
+    expect(podAgentConfig(null)).toEqual({ provider: "kube-agents/default" });
+    expect(podAgentConfig({ provider: "claude" })).toEqual({ provider: "kube-agents/default" });
   });
 
   it("normalizes the settings value and credential readiness", () => {

@@ -31,6 +31,8 @@ interface WorkspaceLocationContribution {
     prompt: string;
     slug: string;
     ref: WorkspaceLocationRef | null;
+    /** The composer's agent settings; null for an empty workspace. */
+    agent?: ComposerAgent | null;
   }): Promise<{ workspaceId: string; agentId?: string }>;
 }
 type WithWorkspaceLocation = PluginClientContext & {
@@ -45,6 +47,28 @@ const REFRESH_MS = 30_000;
  * the composer once the session is up.
  */
 export const POD_AGENT_PROVIDER = "kube-agents/default";
+
+/** The composer's agent settings, as the fork passes them to a workspace location. */
+export interface ComposerAgent {
+  provider: string;
+  model?: string;
+  thinkingOptionId?: string;
+  modeId?: string;
+  featureValues?: Record<string, unknown>;
+}
+
+/**
+ * The pod agent follows the composer: its model (the adapter in the pod resolves the id), thinking
+ * level and mode. The provider is always kube-agents. Feature values belong to the composer's own
+ * provider and are not forwarded: the kube-agents provider declares none, so Paseo would reject them.
+ */
+export function podAgentConfig(agent: ComposerAgent | null | undefined) {
+  return {
+    provider: agent?.model ? `kube-agents/${agent.model}` : POD_AGENT_PROVIDER,
+    ...(agent?.thinkingOptionId ? { thinkingOptionId: agent.thinkingOptionId } : {}),
+    ...(agent?.modeId ? { modeId: agent.modeId } : {}),
+  };
+}
 
 /** The Claude OAuth token: without it a pod agent cannot run. GitHub access needs no pod credential. */
 export function credentialsReady(set: Record<string, boolean>): boolean {
@@ -80,7 +104,7 @@ export function contributePodLocation(client: PluginClientContext): () => void {
       if (Date.now() - lastRefresh > REFRESH_MS) refresh();
       return ready;
     },
-    async createWorkspace({ project, idempotencyKey, prompt, slug, ref }) {
+    async createWorkspace({ project, idempotencyKey, prompt, slug, ref, agent: composer }) {
       const status = await client.rpc(credentialsStatus, {});
       if (!credentialsReady(status.set)) {
         throw new Error("Set CLAUDE_CODE_OAUTH_TOKEN in the Kube Agents screen first.");
@@ -91,7 +115,7 @@ export function contributePodLocation(client: PluginClientContext): () => void {
         idempotencyKey,
       });
       const agent = await workspace.agents.create({
-        config: { provider: POD_AGENT_PROVIDER },
+        config: podAgentConfig(composer),
         // Opts the pod agent into the GitHub Proxy plugin (if installed), its only route to GitHub.
         env: { PASEO_GITHUB_PROXY: "on", ...refEnv(ref, slug) },
         prompt,
