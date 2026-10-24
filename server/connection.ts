@@ -133,8 +133,8 @@ interface PodSession {
   recovering: boolean;
   /** True while the agent session is being reopened on a replacement pod. */
   reopening: boolean;
-  /** Why the last reopen failed, if it did. */
-  reopenFailure?: string;
+  /** Settles when the agent process has opened (or failed to open) the session being reopened. */
+  reopenWaiter?: { requestId: string; settle: (error?: Error) => void };
   closing: boolean;
   /** Timestamps of recent recoveries, to stop a crash loop. */
   recoveries: number[];
@@ -298,7 +298,10 @@ export async function connectKube(
     }
     // Reopening on a replacement pod is internal: Paseo already has this session open. A failed reopen is
     // kept so the caller can report it instead of carrying on with a session the agent never opened.
-    if (event.type === "request.failed" && event.requestId.startsWith("recover-")) ps.reopenFailure = event.error.message;
+    if (ps.reopenWaiter && "requestId" in event && event.requestId === ps.reopenWaiter.requestId) {
+      if (event.type === "request.failed") ps.reopenWaiter.settle(new Error(event.error.message));
+      else if (event.type === "session.ready" || event.type === "session.opened") ps.reopenWaiter.settle();
+    }
     if ("requestId" in event && typeof event.requestId === "string" && event.requestId.startsWith("recover-")) return;
     if (ps.reopening && (event.type === "session.opened" || event.type === "session.ready")) return;
     // The ACP runtime cannot take Paseo's tool policy, so tools preapproved on the daemon are
@@ -329,20 +332,35 @@ export async function connectKube(
     startPodBridge(ps);
     const inner = await startInner(sessionId, ps);
     ps.reopening = true;
-    ps.reopenFailure = undefined;
+    const requestId = `recover-${Date.now()}`;
+    // The agent process opens the session after `send` returns: wait until it says so, or the first
+    // message would reach a session that does not exist yet.
+    const opened = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => settle(new Error("the agent did not open its session in time")), 190_000);
+      const settle = (error?: Error) => {
+        clearTimeout(timer);
+        ps.reopenWaiter = undefined;
+        error ? reject(error) : resolve();
+      };
+      ps.reopenWaiter = { requestId, settle };
+    });
+    opened.catch(() => undefined);
     try {
       await inner.send({
         type: "session.open",
-        requestId: `recover-${Date.now()}`,
+        requestId,
         sessionId,
         config: ps.config,
         history: "skip",
         ...(ps.persistence ? { persistence: ps.persistence } : {}),
       } as ProviderInput);
+      await opened;
+    } catch (error) {
+      ps.reopenWaiter?.settle(error as Error);
+      throw new Error(`the agent could not reopen its session: ${(error as Error).message}`);
     } finally {
       ps.reopening = false;
     }
-    if (ps.reopenFailure) throw new Error(`the agent could not reopen its session: ${ps.reopenFailure}`);
   }
 
   const persistent = config.storage.mode === "persistent";
@@ -652,7 +670,6 @@ export async function connectKube(
     capabilities,
     async send(input) {
       if (closed) throw new Error("kube-agents connection is closed");
-      console.log(`[kube-agents] input ${input.type} session=${"sessionId" in input ? String(input.sessionId).slice(0, 8) : "-"} known=${[...sessions.keys()].map((k) => k.slice(0, 8)).join(",")}`);
       switch (input.type) {
         case "catalog":
           emit({ type: "catalog", requestId: input.requestId, catalog: await catalog() });

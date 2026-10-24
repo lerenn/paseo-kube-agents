@@ -106,6 +106,10 @@ export class FakeAcp {
   listeners = new Set<(e: ProviderEvent) => void>();
   closed = false;
   closeCount = 0;
+  /** Like the real ACP runtime: `send(session.open)` returns at once and the session opens afterwards. */
+  holdOpen = false;
+  failOpen?: string;
+  heldOpen?: { requestId: string; sessionId: string; cwd: string };
   connector?: AcpConnector;
 
   provider = (connector: AcpConnector): ProviderRegistration => {
@@ -118,9 +122,17 @@ export class FakeAcp {
         capabilities: [],
         send: async (input) => {
           this.inputs.push(input);
+          if (input.type === "session.open" && this.failOpen) {
+            this.emit({ type: "request.failed", requestId: input.requestId, error: { message: this.failOpen } });
+            return;
+          }
+          if (input.type === "session.open" && this.holdOpen) {
+            this.heldOpen = { requestId: input.requestId, sessionId: input.sessionId, cwd: input.config.cwd };
+            return;
+          }
           if (input.type === "session.open") {
-            this.emit({ type: "session.opened", sessionId: input.sessionId, capabilities: ["prompt.image", "session.persistence"], restoration: "core", cwd: input.config.cwd, persistence: { version: 1, data: { sessionId: `native-${input.sessionId}` } } });
-            this.emit({ type: "session.ready", sessionId: input.sessionId });
+            this.emit({ type: "session.opened", requestId: input.requestId, sessionId: input.sessionId, capabilities: ["prompt.image", "session.persistence"], restoration: "core", cwd: input.config.cwd, persistence: { version: 1, data: { sessionId: `native-${input.sessionId}` } } });
+            this.emit({ type: "session.ready", requestId: input.requestId, sessionId: input.sessionId });
           }
           if (input.type === "session.prompt" && (input.prompt.input as any).content?.[0]?.text === "ask") {
             this.emit({
@@ -156,6 +168,13 @@ export class FakeAcp {
       }),
     };
   };
+
+  /** Finishes a held open, as the runtime does once the agent process has loaded the session. */
+  finishOpen() {
+    const held = this.heldOpen!;
+    this.emit({ type: "session.opened", requestId: held.requestId, sessionId: held.sessionId, capabilities: [], restoration: "core", cwd: held.cwd });
+    this.emit({ type: "session.ready", requestId: held.requestId, sessionId: held.sessionId });
+  }
 
   emit(event: ProviderEvent) {
     for (const l of this.listeners) l(event);

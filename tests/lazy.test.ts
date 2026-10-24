@@ -93,6 +93,36 @@ describe("opening a session costs nothing", () => {
   });
 });
 
+describe("the agent opens its session after send returns", () => {
+  it("does not deliver the first message until the agent has opened its session", async () => {
+    const acp = new FakeAcp();
+    acp.holdOpen = true;
+    const { conn } = await setup({ acpProvider: acp.provider });
+    await conn.send({ type: "session.open", requestId: "r", sessionId: "s1", config: cfg(), history: "skip" });
+    let delivered = false;
+    const sent = conn.send(prompt("s1")).then(() => (delivered = true));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(acp.inputs.some((i: any) => i.type === "session.prompt")).toBe(false); // the session is not open yet
+    expect(delivered).toBe(false);
+    acp.finishOpen();
+    await sent;
+    expect(acp.inputs.map((i: any) => i.type)).toEqual(["session.open", "session.prompt"]);
+  });
+
+  it("reports a session the agent failed to open, and goes back to retry-able", async () => {
+    const acp = new FakeAcp();
+    acp.failOpen = "could not load the conversation";
+    const { conn, events } = await setup({ acpProvider: acp.provider });
+    await conn.send({ type: "session.open", requestId: "r", sessionId: "s1", config: cfg(), history: "skip" });
+    await expect(conn.send(prompt("s1"))).rejects.toThrow(/could not reopen its session: could not load the conversation/);
+    expect(acp.inputs.some((i: any) => i.type === "session.prompt")).toBe(false);
+    expect(events.some((e: any) => e.notice?.title?.includes("could not load the conversation"))).toBe(true);
+    acp.failOpen = undefined;
+    await conn.send(prompt("s1"));
+    expect(acp.inputs.some((i: any) => i.type === "session.prompt")).toBe(true);
+  });
+});
+
 describe("unlabelled sweep", () => {
   const NOW = Date.parse("2026-10-24T12:00:00Z");
   const old = new Date(NOW - 60 * 60_000).toISOString();
