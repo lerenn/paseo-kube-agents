@@ -12,7 +12,7 @@ export interface BridgeReply {
   pack?: string;
 }
 
-export type PushRequest = { op: "push"; ref: string; old: string; new: string; base: string; pack: string };
+export type PushRequest = { op: "push"; ref: string; old: string; new: string; base: string; pack: string; /** A submodule's mirror in the pod; absent for the project's own branches. */ mirror?: string };
 export type BridgeRequest = PushRequest | FetchRequest;
 
 export interface BridgeHandlers {
@@ -39,6 +39,8 @@ export async function applyPush(
   git: GitRunner,
   projectDir: string,
   request: PushRequest,
+  /** Where the commits are applied and what is pushed to; the project's origin unless a mirror asked. */
+  destination: { dir: string; remote: string } = { dir: projectDir, remote: "origin" },
 ): Promise<BridgeReply> {
   const { ref, new: sha, old, base } = request;
   if (!BRANCH_REF.test(ref) || ref.includes("..")) return { ok: false, message: `kube-agents: refusing to push ${ref}: only branches are pushed from pods` };
@@ -47,13 +49,13 @@ export async function applyPush(
   if (pack.length > MAX_PACK_BYTES) return { ok: false, message: "kube-agents: push is too large to relay (over 64MB)" };
 
   if (pack.length > 0) {
-    const indexed = await git(["index-pack", "--stdin", "--fix-thin"], { cwd: projectDir, input: pack });
+    const indexed = await git(["index-pack", "--stdin", "--fix-thin"], { cwd: destination.dir, input: pack });
     if (indexed.code !== 0) return { ok: false, message: `kube-agents: could not read the pushed commits: ${scrub(indexed.stderr.trim())}` };
   }
-  const known = await git(["cat-file", "-e", `${sha}^{commit}`], { cwd: projectDir });
+  const known = await git(["cat-file", "-e", `${sha}^{commit}`], { cwd: destination.dir });
   if (known.code !== 0) return { ok: false, message: "kube-agents: the pushed commit is missing on the daemon" };
 
-  const pushed = await git(["push", "origin", `${sha}:${ref}`], { cwd: projectDir });
+  const pushed = await git(["push", destination.remote, `${sha}:${ref}`], { cwd: destination.dir });
   if (pushed.code !== 0) {
     return { ok: false, message: `kube-agents: push to ${ref} rejected by the remote:\n${scrub(pushed.stderr.trim())}` };
   }

@@ -24,8 +24,8 @@ export async function installAssets(kube: Kube, pod: string): Promise<void> {
 }
 
 /** Points git in the pod at local mirrors of the project's remote and its submodules, refreshed through the bridge. */
-export async function setupMirrors(kube: Kube, pod: string, cwd: string, targets: readonly FetchTarget[]): Promise<void> {
-  const r = await kube.exec(pod, ["sh", "-c", MIRROR_SETUP_SCRIPT, "sh", ...mirrorSetupArgs(cwd, targets)]);
+export async function setupMirrors(kube: Kube, pod: string, cwd: string, identity: { name: string; email: string }, targets: readonly FetchTarget[]): Promise<void> {
+  const r = await kube.exec(pod, ["sh", "-c", MIRROR_SETUP_SCRIPT, "sh", ...mirrorSetupArgs(cwd, identity, targets)]);
   if (r.code !== 0) throw new Error(`could not set up fetching in the pod: ${r.stderr.trim()}`);
 }
 

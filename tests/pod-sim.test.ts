@@ -186,7 +186,20 @@ describe("fetching through the daemon (real git, real pod scripts)", () => {
     const updated = await kube.as(["git", "submodule", "update", "--remote", "vendor/lib"], { cwd: podDir });
     expect(updated.code, updated.stderr).toBe(0);
     expect(sh(join(podDir, "vendor/lib"), "log", "-1", "--format=%s")).toBe("lib two");
-    expect(sub).toBeTruthy();
+
+    // the pod commits in the submodule with the daemon's identity (no identity set up by the agent) and pushes a branch
+    const lib = join(podDir, "vendor/lib");
+    writeFileSync(join(lib, "pod.txt"), "from the pod\n");
+    const steps = [["git", "switch", "-q", "-c", "pod-branch"], ["git", "add", "."], ["git", "commit", "-qm", "pod change"], ["git", "push", "origin", "pod-branch"]];
+    for (const argv of steps) {
+      const r = await kube.as(argv, { cwd: lib });
+      expect(r.code, `${argv.join(" ")}: ${r.stderr}`).toBe(0);
+    }
+    expect(sh(sub, "log", "-1", "--format=%s", "refs/heads/pod-branch")).toBe("pod change");
+    expect(sh(sub, "log", "-1", "--format=%an", "refs/heads/pod-branch")).toBeTruthy();
+    const del = await kube.as(["git", "push", "origin", ":pod-branch"], { cwd: lib });
+    expect(del.code).not.toBe(0);
+    expect(del.stderr).toMatch(/not supported/);
   });
 });
 

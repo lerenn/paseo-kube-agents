@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { applyPush, type BridgeReply, type PushRequest } from "./bridge.js";
 import { type GitRunner, scrub } from "./git.js";
 import { toHttpsRemote } from "./workspace.js";
 
@@ -85,7 +86,9 @@ mkdir -p "$HOME/mirrors"
 git config --global protocol.file.allow always
 git config --global push.autoSetupRemote true
 git config --global remote.origin.uploadpack "$HOME/bin/paseo-upload-pack"
-cwd="$1"; shift
+cwd="$1"; name="$2"; email="$3"; shift 3
+git config --global user.name "$name"
+git config --global user.email "$email"
 while [ $# -gt 0 ]; do
   id="$1"; origin="$2"; shift 2
   urls=""
@@ -103,8 +106,8 @@ done
 `;
 
 /** Arguments of `MIRROR_SETUP_SCRIPT` after `sh -c <script> sh`. */
-export function mirrorSetupArgs(cwd: string, targets: readonly FetchTarget[]): string[] {
-  return [cwd, ...targets.flatMap((t) => [t.id, t.origin ? "1" : "0", ...t.podUrls, "--"])];
+export function mirrorSetupArgs(cwd: string, identity: { name: string; email: string }, targets: readonly FetchTarget[]): string[] {
+  return [cwd, identity.name, identity.email, ...targets.flatMap((t) => [t.id, t.origin ? "1" : "0", ...t.podUrls, "--"])];
 }
 
 export type FetchRequest = { op: "fetch"; mirror: string; haves: string[] };
@@ -119,7 +122,7 @@ export interface FetchReply {
 }
 
 /** The daemon-side cache a target is fetched into (a bare repository next to the project's git dir). */
-async function cacheDir(git: GitRunner, cwd: string, target: FetchTarget): Promise<string> {
+export async function cacheDir(git: GitRunner, cwd: string, target: FetchTarget): Promise<string> {
   const common = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd });
   if (common.code !== 0) throw new Error(`not a git checkout: ${scrub(common.stderr.trim())}`);
   const dir = join(common.stdout.trim(), "kube-mirrors", `${target.id}.git`);
@@ -186,4 +189,17 @@ export async function applyFetch(
     if (pack.length > MAX_PACK_BYTES * 1.4) return { ok: false, message: "kube-agents: the fetch is too large to relay through the cluster API (over 64MB)" };
   }
   return { ok: true, refs, ...(head ? { head } : {}), ...(pack ? { pack } : {}) };
+}
+
+/** A pod's push to a submodule's mirror: applied in the daemon's cache of that remote and pushed from there. */
+export async function pushToMirror(
+  git: GitRunner,
+  cwd: string,
+  request: PushRequest,
+  targets: readonly FetchTarget[],
+): Promise<BridgeReply> {
+  const target = targets.find((t) => t.id === request.mirror);
+  if (!target) return { ok: false, message: "kube-agents: this remote is not part of the project (only its origin and submodules can be pushed to from a pod)" };
+  const dir = await cacheDir(git, cwd, target);
+  return applyPush(git, cwd, request, { dir, remote: target.daemonUrl });
 }
