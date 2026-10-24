@@ -45,6 +45,7 @@ export default function contribute(server: PluginServerContext) {
     kubeFor,
     daemonId,
     activeSandboxes: () => new Set(registry.list().map((p) => p.sandbox)),
+    onNames: (names) => runtime.syncNames(names),
   });
   reaper.start();
 

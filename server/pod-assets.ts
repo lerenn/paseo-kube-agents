@@ -10,7 +10,9 @@
  */
 export const BRIDGE_SCRIPT = String.raw`import net from "node:net";
 import fs from "node:fs";
+import path from "node:path";
 import readline from "node:readline";
+import { execFileSync } from "node:child_process";
 
 const [mode, ...args] = process.argv.slice(2);
 const sock = (process.env.HOME || ".") + "/bridge.sock";
@@ -24,6 +26,20 @@ if (mode === "call") {
     msg.ref = args[1]; msg.old = args[2]; msg.new = args[3]; msg.base = args[4];
     msg.pack = Buffer.concat(chunks).toString("base64");
   }
+  if (op === "fetch") {
+    // args[1] is a mirror repository; send what it (and the checkout it borrows objects from) already has.
+    const dir = path.resolve(args[1]);
+    const git = (g, a, input) => execFileSync("git", ["--git-dir", g, ...a], { encoding: "utf8", input, maxBuffer: 1 << 28 });
+    const tips = (g) => git(g, ["for-each-ref", "--format=%(objectname)"]).split("\n").filter(Boolean);
+    const haves = new Set(tips(dir));
+    try {
+      for (const alt of fs.readFileSync(dir + "/objects/info/alternates", "utf8").split("\n").filter(Boolean)) {
+        for (const h of tips(path.dirname(alt))) haves.add(h);
+      }
+    } catch {}
+    msg.mirror = path.basename(dir, ".git");
+    msg.haves = [...haves];
+  }
   const conn = net.connect(sock);
   let out = "";
   conn.on("error", (e) => { console.error("kube-agents: bridge unavailable: " + e.message); process.exit(1); });
@@ -32,6 +48,21 @@ if (mode === "call") {
     let r;
     try { r = JSON.parse(out); } catch { console.error("kube-agents: bad bridge reply"); process.exit(1); }
     if (r.message) console.error(r.message);
+    if (op === "fetch" && r.ok) {
+      const dir = path.resolve(args[1]);
+      const git = (a, input) => execFileSync("git", ["--git-dir", dir, ...a], { encoding: "utf8", input, maxBuffer: 1 << 28 });
+      try {
+        if (r.pack) execFileSync("git", ["--git-dir", dir, "index-pack", "--stdin", "--fix-thin"], { input: Buffer.from(r.pack, "base64"), stdio: ["pipe", "ignore", "inherit"] });
+        const want = new Map(r.refs.map(([ref, sha]) => [ref, sha]));
+        const cmds = [];
+        for (const line of git(["for-each-ref", "--format=%(refname)"]).split("\n").filter(Boolean)) {
+          if (!want.has(line)) cmds.push("delete " + line);
+        }
+        for (const [ref, sha] of want) cmds.push("update " + ref + " " + sha);
+        if (cmds.length) git(["update-ref", "--stdin"], cmds.join("\n") + "\n");
+        if (r.head) git(["symbolic-ref", "HEAD", r.head]);
+      } catch (e) { console.error("kube-agents: could not store the fetched commits: " + e.message); process.exit(1); }
+    }
     process.exit(r.ok ? 0 : 1);
   });
   conn.end(JSON.stringify(msg) + "\n");
@@ -123,6 +154,23 @@ if (!url || !capability) {
   if (out.stderr) process.stderr.write(out.stderr);
   process.exit(out.code ?? 0);
 })();
+`;
+
+/**
+ * Stands in for `git-upload-pack` (the global `remote.origin.uploadpack`) on the pod's local mirrors of the
+ * project's remote and its submodules: asks the plugin to refresh the mirror from the real remote with the
+ * daemon's credentials, then serves it as usual. `git fetch`, `git pull` and `git submodule update` just work.
+ */
+export const UPLOAD_PACK_WRAPPER = String.raw`#!/bin/sh
+dir="$1"
+node "$HOME/bridge.mjs" call fetch "$dir" </dev/null >&2 || exit 1
+exec git-upload-pack "$dir"
+`;
+
+/** Mirrors only serve fetches; pushes (for example from a submodule) must not silently land in them. */
+export const MIRROR_PRE_RECEIVE = String.raw`#!/bin/sh
+echo "kube-agents: pushing to this remote is not supported from a pod; only the project's own branches can be pushed" >&2
+exit 1
 `;
 
 /**

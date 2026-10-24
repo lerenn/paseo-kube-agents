@@ -1,6 +1,7 @@
 import { Readable } from "node:stream";
 import { HOME_DIR } from "./sandbox.js";
-import { BRIDGE_SCRIPT, GH_SHIM_SCRIPT, INSTALLABLE_CLIS, PRE_RECEIVE_HOOK, envFile } from "./pod-assets.js";
+import { BRIDGE_SCRIPT, GH_SHIM_SCRIPT, INSTALLABLE_CLIS, MIRROR_PRE_RECEIVE, PRE_RECEIVE_HOOK, UPLOAD_PACK_WRAPPER, envFile } from "./pod-assets.js";
+import { MIRROR_SETUP_SCRIPT, mirrorSetupArgs, type FetchTarget } from "./mirrors.js";
 import type { Kube } from "./kube.js";
 import type { Seed } from "./seed.js";
 
@@ -18,6 +19,32 @@ export async function installAssets(kube: Kube, pod: string): Promise<void> {
   await write(kube, pod, "bridge.mjs", BRIDGE_SCRIPT, "644");
   await write(kube, pod, "bin/gh", GH_SHIM_SCRIPT, "755");
   await write(kube, pod, "outbox.git/hooks/pre-receive", PRE_RECEIVE_HOOK, "755");
+  await write(kube, pod, "bin/paseo-upload-pack", UPLOAD_PACK_WRAPPER, "755");
+  await write(kube, pod, "mirror-pre-receive", MIRROR_PRE_RECEIVE, "755");
+}
+
+/** Points git in the pod at local mirrors of the project's remote and its submodules, refreshed through the bridge. */
+export async function setupMirrors(kube: Kube, pod: string, cwd: string, targets: readonly FetchTarget[]): Promise<void> {
+  const r = await kube.exec(pod, ["sh", "-c", MIRROR_SETUP_SCRIPT, "sh", ...mirrorSetupArgs(cwd, targets)]);
+  if (r.code !== 0) throw new Error(`could not set up fetching in the pod: ${r.stderr.trim()}`);
+}
+
+/** Checks out the submodules recorded in the seeded commit (their commits come through the fetch bridge). */
+export async function initSubmodules(
+  kube: Kube,
+  pod: string,
+  cwd: string,
+  targets: readonly FetchTarget[],
+): Promise<{ ok: boolean; message: string }> {
+  const present = await kube.exec(pod, ["test", "-f", `${cwd}/.gitmodules`]);
+  if (present.code !== 0) return { ok: true, message: "" };
+  // `git clone` does not run the fetch wrapper, so fill the submodules' mirrors first
+  for (const target of targets.filter((t) => !t.origin)) {
+    const r = await kube.exec(pod, ["sh", "-c", 'node "$HOME/bridge.mjs" call fetch "$HOME/mirrors/$1.git" </dev/null', "sh", target.id]);
+    if (r.code !== 0) return { ok: false, message: r.stderr.trim() };
+  }
+  const r = await kube.exec(pod, ["git", "-C", cwd, "submodule", "update", "--init"]);
+  return { ok: r.code === 0, message: r.code === 0 ? "" : r.stderr.trim() };
 }
 
 const SEED_SCRIPT = `set -e

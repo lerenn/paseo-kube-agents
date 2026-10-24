@@ -75,6 +75,38 @@ describe("seed from the daemon's checkout", () => {
     expect(sh(pod, "log", "-1", "--format=%s")).toBe("from elsewhere");
   });
 
+  it("fetches the checked-out branch fresh: a stale checkout is seeded from the remote's tip, unpushed work is kept", async () => {
+    const { project, root, origin } = fixture();
+    const other = join(root, "other2");
+    sh(root, "clone", "-q", origin, other);
+    writeFileSync(join(other, "up.txt"), "u\n");
+    sh(other, "add", ".");
+    sh(other, "commit", "-qm", "upstream moved on");
+    sh(other, "push", "-q", "origin", "main");
+
+    const stale = await createSeed(runGit, project, null, "main");
+    expect(sh(project, "log", "-1", "--format=%s", stale.ref)).toBe("upstream moved on");
+    await releaseSeed(runGit, project, stale);
+
+    writeFileSync(join(project, "mine.txt"), "m\n");
+    sh(project, "add", ".");
+    sh(project, "commit", "-qm", "unpushed");
+    const diverged = await createSeed(runGit, project, { action: "checkout", branch: "main" }, "main");
+    expect(sh(project, "log", "-1", "--format=%s", diverged.ref)).toBe("unpushed");
+  });
+
+  it("branches off the remote's current base, not the daemon's stale copy", async () => {
+    const { project, root, origin } = fixture();
+    const other = join(root, "other3");
+    sh(root, "clone", "-q", origin, other);
+    writeFileSync(join(other, "up.txt"), "u\n");
+    sh(other, "add", ".");
+    sh(other, "commit", "-qm", "base moved");
+    sh(other, "push", "-q", "origin", "main");
+    const seed = await createSeed(runGit, project, { action: "branch-off", branch: "main", slug: "s" }, "main");
+    expect(sh(project, "log", "-1", "--format=%s", seed.ref)).toBe("base moved");
+  });
+
   it("seeds a pull request's head", async () => {
     const { project, origin } = fixture();
     sh(origin, "update-ref", "refs/pull/7/head", sh(origin, "rev-parse", "refs/heads/feat"));

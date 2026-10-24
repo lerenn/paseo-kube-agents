@@ -6,9 +6,14 @@ export const MANAGED_BY_LABEL = "app.kubernetes.io/managed-by";
 export const MANAGED_BY = "paseo-kube-agents";
 /** The owning daemon and the Paseo workspace a sandbox serves: what the orphan reaper goes by. */
 export const DAEMON_LABEL = "paseo.sh/daemon";
+export const WORKSPACE_ID_LABEL = "paseo.sh/workspace-id";
+/** For people (`kubectl get pods -L paseo.sh/workspace,paseo.sh/agent,paseo.sh/state`); earlier versions put the id here. */
 export const WORKSPACE_LABEL = "paseo.sh/workspace";
-/** Written by the earlier provider-based design; the reaper still understands it. */
 export const AGENT_LABEL = "paseo.sh/agent";
+export const REPO_LABEL = "paseo.sh/repo";
+export const STATE_LABEL = "paseo.sh/state";
+export const WORKSPACE_NAME_ANNOTATION = "paseo.sh/workspace-name";
+export const REPO_URL_ANNOTATION = "paseo.sh/repo-url";
 export const SPEC_HASH_ANNOTATION = "paseo.sh/spec-hash";
 /** The project directory on the daemon, so a restarted plugin can resume a workspace it has not been told about yet. */
 export const CWD_ANNOTATION = "paseo.sh/cwd";
@@ -21,6 +26,46 @@ export const CHECKOUT_SUBPATH = "checkout";
 export const WORKSPACE_VOLUME = "workspace";
 /** The Sandbox controller names the claim `<claim template name>-<sandbox name>`. */
 export const workspaceClaimName = (sandbox: string) => `${WORKSPACE_VOLUME}-${sandbox}`;
+
+/** A valid label value (at most 63 characters, alphanumeric at both ends) made from free text; the full text goes in an annotation. */
+export function labelValue(text: string | undefined): string | undefined {
+  const v = (text ?? "").replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 63).replace(/[^A-Za-z0-9]+$/, "");
+  return v || undefined;
+}
+
+export type PodState = "running" | "suspended";
+
+/** What people see on a workspace's Sandbox, pod and volume claim. */
+export interface PodMeta {
+  /** The workspace's name in Paseo (its title). */
+  workspaceName: string;
+  repo: string;
+  repoUrl?: string;
+  /** Short id of the agent that most recently ran in the workspace. */
+  agent?: string;
+  state: PodState;
+}
+
+const dropUndefined = (o: Record<string, string | undefined>) =>
+  Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Record<string, string>;
+
+export function metaLabels(meta: PodMeta): Record<string, string> {
+  return dropUndefined({
+    [WORKSPACE_LABEL]: labelValue(meta.workspaceName),
+    [AGENT_LABEL]: labelValue(meta.agent),
+    [REPO_LABEL]: labelValue(meta.repo),
+    [STATE_LABEL]: meta.state,
+  });
+}
+
+export function metaAnnotations(meta: PodMeta): Record<string, string> {
+  return dropUndefined({ [WORKSPACE_NAME_ANNOTATION]: meta.workspaceName, [REPO_URL_ANNOTATION]: meta.repoUrl?.replace(/\/\/[^/@]*@/, "//") });
+}
+
+/** Merge patch that brings a Sandbox's labels and annotations up to date (the pod and claim are labelled separately). */
+export function metaPatch(meta: PodMeta): Record<string, unknown> {
+  return { metadata: { labels: metaLabels(meta), annotations: metaAnnotations(meta) } };
+}
 
 const slugify = (text: string, max: number) =>
   text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, max).replace(/-+$/g, "");
@@ -53,15 +98,18 @@ export interface SandboxSpecInput {
   cwd: string;
   config: KubernetesRuntimeConfig;
   daemonId?: string;
+  meta?: PodMeta;
 }
 
 /** A `Sandbox` (agents.x-k8s.io) whose single container idles; provider processes are started in it by `kubectl exec`. */
 export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
-  const { name, workspaceId, cwd, config, daemonId } = input;
-  const podLabels = { [MANAGED_BY_LABEL]: MANAGED_BY };
+  const { name, workspaceId, cwd, config, daemonId, meta } = input;
+  const shown = meta ? metaLabels(meta) : {};
+  const podLabels = { [MANAGED_BY_LABEL]: MANAGED_BY, ...shown };
   const owner = {
     ...(daemonId ? { [DAEMON_LABEL]: daemonId } : {}),
-    [WORKSPACE_LABEL]: workspaceId,
+    [WORKSPACE_ID_LABEL]: workspaceId,
+    ...shown,
   };
   return {
     apiVersion: config.sandboxApiVersion,
@@ -70,7 +118,7 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
       name,
       namespace: config.namespace,
       labels: { ...podLabels, ...owner },
-      annotations: { [SPEC_HASH_ANNOTATION]: specHash(config, cwd), [CWD_ANNOTATION]: cwd },
+      annotations: { [SPEC_HASH_ANNOTATION]: specHash(config, cwd), [CWD_ANNOTATION]: cwd, ...(meta ? metaAnnotations(meta) : {}) },
     },
     // No shutdownTime: a workspace's storage goes only when the workspace is archived (or the reaper finds
     // it gone). Only `operatingMode` changes over its life.
@@ -79,7 +127,7 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
       service: false,
       ...volumeClaims(config, owner),
       podTemplate: {
-        metadata: { labels: podLabels },
+        metadata: { labels: podLabels, ...(meta ? { annotations: metaAnnotations(meta) } : {}) },
         spec: {
           restartPolicy: "Never",
           automountServiceAccountToken: false,

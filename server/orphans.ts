@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import type { KubernetesRuntimeConfig } from "./config.js";
 import type { Kube } from "./kube.js";
-import { AGENT_LABEL, DAEMON_LABEL, MANAGED_BY, MANAGED_BY_LABEL, WORKSPACE_LABEL, workspaceClaimName } from "./sandbox.js";
+import { AGENT_LABEL, DAEMON_LABEL, MANAGED_BY, MANAGED_BY_LABEL, WORKSPACE_ID_LABEL, WORKSPACE_LABEL, workspaceClaimName } from "./sandbox.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,24 +36,29 @@ export async function paseoAgentState(agentId: string, exec: Exec = execFileAsyn
 }
 
 /**
- * The ids of the workspaces Paseo still has (active and background), or null when that cannot be read, in which
- * case nothing is deleted on a workspace's account.
+ * The workspaces Paseo still has (active and background) with their names, or null when that cannot be read, in
+ * which case nothing is deleted on a workspace's account.
  */
-export async function paseoWorkspaceIds(exec: Exec = execFileAsync as unknown as Exec): Promise<Set<string> | null> {
-  const ids = new Set<string>();
+export async function paseoWorkspaces(exec: Exec = execFileAsync as unknown as Exec): Promise<Map<string, string> | null> {
+  const found = new Map<string, string>();
   try {
     for (const extra of [[], ["--background"]]) {
       const { stdout } = await exec("paseo", ["workspace", "ls", "--json", ...extra], { timeout: 20_000 });
-      const list = JSON.parse(stdout) as { workspaceId?: string }[];
+      const list = JSON.parse(stdout) as { workspaceId?: string; name?: string }[];
       if (!Array.isArray(list)) return null;
-      for (const entry of list) if (entry.workspaceId) ids.add(entry.workspaceId);
+      for (const entry of list) if (entry.workspaceId) found.set(entry.workspaceId, entry.name ?? "");
     }
     // an empty answer is not trusted: deleting every workspace's pod because a listing came back empty would be a disaster
-    return ids.size > 0 ? ids : null;
+    return found.size > 0 ? found : null;
   } catch {
     return null;
   }
 }
+
+export const paseoWorkspaceIds = async (exec?: Exec): Promise<Set<string> | null> => {
+  const found = await paseoWorkspaces(exec);
+  return found && new Set(found.keys());
+};
 
 export interface ReapStatus {
   /** ISO time of the last run. */
@@ -80,6 +85,10 @@ export interface ReaperDeps {
   unlabelledGraceMs?: number;
   /** The workspaces Paseo still has; null when unknown. */
   workspaceIds?: () => Promise<Set<string> | null>;
+  /** The same with names, to keep pod labels current after a rename; takes precedence over `workspaceIds`. */
+  workspaces?: () => Promise<Map<string, string> | null>;
+  /** Told the workspaces' current names after each run. */
+  onNames?: (names: Map<string, string>) => Promise<void>;
   /** Sandboxes this plugin is running right now, never swept. */
   activeSandboxes?: () => Set<string>;
   log?: (line: string) => void;
@@ -137,11 +146,22 @@ export class OrphanReaper {
       let removed = 0;
 
       const mine = await kube.listSandboxes(`${DAEMON_LABEL}=${daemonId}`);
-      const workspaces = mine.some((s) => s.labels[WORKSPACE_LABEL]) ? await (this.deps.workspaceIds ?? paseoWorkspaceIds)() : null;
+      const workspaceKey = (s: { labels: Record<string, string> }) =>
+        s.labels[WORKSPACE_ID_LABEL] ?? (s.labels[WORKSPACE_LABEL]?.startsWith("wks_") ? s.labels[WORKSPACE_LABEL] : undefined);
+      let names: Map<string, string> | null = null;
+      let workspaces: Set<string> | null = null;
+      if (mine.some(workspaceKey)) {
+        if (this.deps.workspaces || !this.deps.workspaceIds) {
+          names = await (this.deps.workspaces ?? paseoWorkspaces)();
+          workspaces = names && new Set(names.keys());
+        } else {
+          workspaces = await this.deps.workspaceIds();
+        }
+      }
       const known = new Map<string, AgentState>();
       for (const sandbox of mine) {
         if (now() - created(sandbox.createdAt) < grace) continue;
-        const workspace = sandbox.labels[WORKSPACE_LABEL];
+        const workspace = workspaceKey(sandbox);
         const agent = sandbox.labels[AGENT_LABEL]; // sandboxes made by the earlier provider-based design
         let reason: string | undefined;
         if (workspace) {
@@ -196,6 +216,7 @@ export class OrphanReaper {
       const unseen = unlabelled.filter((n) => !this.status.unlabelled.includes(n));
       if (unseen.length) log(`[kubernetes-runtime] orphan cleanup: ${unseen.length} sandbox(es) without a daemon label are left alone: ${unseen.join(", ")}`);
 
+      if (names && this.deps.onNames) await this.deps.onNames(names).catch(() => undefined);
       this.status = {
         lastRunAt: new Date(now()).toISOString(),
         removed,

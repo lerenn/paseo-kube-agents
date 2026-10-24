@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { OrphanReaper, paseoAgentState, paseoWorkspaceIds, type AgentState } from "../server/orphans.js";
-import { buildSandbox } from "../server/sandbox.js";
+import { buildSandbox, labelValue } from "../server/sandbox.js";
 import { readDaemonId } from "../server/daemon.js";
 import { ConfigSchema } from "../shared/settings.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -33,6 +33,27 @@ function setup(workspaces: string[] | null, opts: { agents?: Record<string, Agen
 }
 
 describe("orphan reaper: workspaces", () => {
+  it("goes by the workspace-id label, whatever the display label says, and reports names after each run", async () => {
+    const kube = new FakeKube();
+    let told: Map<string, string> | undefined;
+    const reaper = new OrphanReaper({
+      getConfig: async () => ConfigSchema.parse({}),
+      kubeFor: () => kube,
+      daemonId: "srv_ME",
+      workspaces: async () => new Map([["wks_alive", "Renamed"]]),
+      onNames: async (names) => void (told = names),
+      now: () => NOW,
+      log: () => undefined,
+    });
+    kube.sandboxes = [
+      sandbox("sb-gone", { ...mine, "paseo.sh/workspace-id": "wks_gone", "paseo.sh/workspace": "Old-Name" }),
+      sandbox("sb-alive", { ...mine, "paseo.sh/workspace-id": "wks_alive", "paseo.sh/workspace": "Old-Name" }),
+    ];
+    await reaper.run();
+    expect(kube.calls.filter((c) => c.startsWith("delete:sandbox"))).toEqual(["delete:sandbox/sb-gone"]);
+    expect(told?.get("wks_alive")).toBe("Renamed");
+  });
+
   it("deletes the sandbox and claim of a workspace Paseo no longer has, and logs it", async () => {
     const { kube, logs, reaper } = setup(["wks_alive"]);
     kube.sandboxes = [sandbox("sb-gone", { ...mine, "paseo.sh/workspace": "wks_gone" }), sandbox("sb-alive", { ...mine, "paseo.sh/workspace": "wks_alive" })];
@@ -151,9 +172,25 @@ describe("labels", () => {
   const config = ConfigSchema.parse({});
   it("labels the sandbox and its volume claim with the daemon and the workspace", () => {
     const sb = buildSandbox({ name: "n", workspaceId: "wks_1", cwd: "/p", config, daemonId: "srv_ME" }) as any;
-    expect(sb.metadata.labels).toMatchObject({ "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace": "wks_1" });
-    expect(sb.spec.volumeClaimTemplates[0].metadata.labels).toEqual({ "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace": "wks_1" });
+    expect(sb.metadata.labels).toMatchObject({ "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace-id": "wks_1" });
+    expect(sb.spec.volumeClaimTemplates[0].metadata.labels).toEqual({ "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace-id": "wks_1" });
     expect(sb.spec.podTemplate.metadata.labels).not.toHaveProperty("paseo.sh/daemon"); // the pod only carries the NetworkPolicy label
+  });
+
+  it("labels the sandbox, pod and claim with the workspace name, agent, repo and state for people", () => {
+    const meta = { workspaceName: "My Repo: fix the login (v2)!", repo: "my-repo", repoUrl: "https://user:tok@github.com/o/my-repo.git", agent: "0c0f7a18", state: "running" as const };
+    const sb = buildSandbox({ name: "pka-n", workspaceId: "wks_1", cwd: "/p", config, daemonId: "srv_ME", meta }) as any;
+    const shown = { "paseo.sh/workspace": "My-Repo-fix-the-login-v2", "paseo.sh/agent": "0c0f7a18", "paseo.sh/repo": "my-repo", "paseo.sh/state": "running" };
+    expect(sb.metadata.labels).toMatchObject(shown);
+    expect(sb.spec.podTemplate.metadata.labels).toMatchObject(shown);
+    expect(sb.spec.volumeClaimTemplates[0].metadata.labels).toMatchObject(shown);
+    expect(sb.metadata.annotations["paseo.sh/workspace-name"]).toBe("My Repo: fix the login (v2)!"); // the full name lives in an annotation
+    expect(sb.metadata.annotations["paseo.sh/repo-url"]).toBe("https://github.com/o/my-repo.git"); // credentials never end up on the object
+    expect(sb.metadata.name).not.toContain("warm");
+    const long = (buildSandbox({ name: "n", workspaceId: "w", cwd: "/p", config, meta: { ...meta, workspaceName: "x".repeat(200) + "-" } }) as any).metadata.labels["paseo.sh/workspace"];
+    expect(long).toHaveLength(63);
+    expect(labelValue("--")).toBeUndefined();
+    expect(labelValue("a b")).toBe("a-b");
   });
 
   it("reads the daemon id from Paseo's home", () => {

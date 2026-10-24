@@ -31,13 +31,22 @@ Paseo daemon                                   cluster (paseo-agents)
 - **Provider processes** run as `kubectl exec -i` with the exact command Paseo asks for. Their environment is the env
   delta Paseo passes (written to a short-lived env file in the pod, never on a command line), nothing from the daemon.
   `claude` and `codex` are installed on first use under `$HOME/.npm-global` (on the volume) if the image lacks them.
-- **Seeding.** The daemon bundles the chosen ref from the project's own checkout (`git bundle`: the branch picker's
-  branch, a branch-off base, or a pull request head, fetched first if missing) and streams it into the pod over
-  `pods/exec` stdin; unpushed local commits come along. Nothing is cloned from GitHub in the pod.
-- **No GitHub credential in the pod.** `git push` there goes to a local "outbox" repository whose `pre-receive`
-  hook asks the plugin, over a bridge on the same `exec` channel, to push the new commits from the daemon with the
-  daemon's own git credentials (branches only). `gh` and GitHub tools go through the GitHub Proxy plugin if it is
-  installed and the agent is opted in (`PASEO_GITHUB_PROXY=on`, or its scope set to all).
+- **Seeding.** The daemon first fetches the chosen ref fresh from origin (the branch picker's branch, the base of a
+  branch-off, a pull request head, or the checkout's own branch: the remote tip when the daemon's copy is behind, the
+  local tip when it has unpushed commits), then bundles it from the project's own checkout (`git bundle`) and streams
+  it into the pod over `pods/exec` stdin. Nothing is cloned from GitHub in the pod. The submodules recorded in the
+  seeded commit are checked out too, through the fetch bridge below.
+- **Fetch bridge (`git fetch`, `git pull`, `git submodule update`).** The pod has no GitHub credential. Git there is
+  pointed at local mirror repositories (a global `url.<mirror>.insteadOf`) for the project's origin and each
+  submodule, with `remote.origin.uploadpack` set to a wrapper that, before serving a fetch, asks the plugin over the
+  bridge to refresh the mirror: the daemon fetches the real remote with its own credentials and sends a thin pack of
+  only what the pod lacks. Branches, tags and the default branch come across; `origin/HEAD` resolves. Only the origin
+  and the submodules recorded in the project are fetchable (nothing else is reachable), and pushing to a submodule's
+  mirror is refused. Limits: 64MB per fetch, no nested submodules, pull request refs (`refs/pull/*`) are not mirrored.
+- **Push-back.** `git push` goes to a local "outbox" repository whose `pre-receive` hook asks the plugin, over the
+  same bridge, to push the new commits from the daemon with the daemon's git credentials (branches only, no
+  deletions). `gh` and GitHub tools go through the GitHub Proxy plugin if it is installed and the agent is opted in
+  (`PASEO_GITHUB_PROXY=on`, or its scope set to all).
 - **Loopback MCP servers** (`http://127.0.0.1:<port>`: GitHub Proxy, MCP Proxy, Inbox, Leases, ...) found in the
   agent's MCP config at `prepare` are tunnelled by port, byte for byte, to the daemon's loopback over the same
   channel: URLs and headers stay unchanged, streams work, and only the named ports are reachable.
@@ -55,6 +64,20 @@ Paseo daemon                                   cluster (paseo-agents)
   Old `pka-` sandboxes with no daemon label are swept after 15 minutes unless the "Remove unlabelled leftovers"
   setting is off (turn it off where several daemons share a namespace). The screen shows "Last reconcile: N orphans
   removed".
+
+## Finding a workspace's pod
+
+Pods are named `pka-<repo>-<slug>-<random>` and labelled for people (values are sanitised to 63 characters; the full
+name is in the `paseo.sh/workspace-name` annotation). The labels are on the Sandbox, the pod and the volume claim and
+follow the workspace's agent, state and name:
+
+```bash
+kubectl -n paseo-agents get pods -L paseo.sh/workspace,paseo.sh/agent,paseo.sh/state,paseo.sh/repo
+```
+
+`paseo.sh/state` is `running` or `suspended` (a suspended workspace has no pod; its volume claim shows the state).
+`paseo.sh/workspace-id` and `paseo.sh/daemon` are what the orphan reconciler goes by. Updating the labels of an
+existing pod and claim needs `patch` on them in the daemon's Role; without it only the Sandbox's labels stay current.
 
 ## Settings
 

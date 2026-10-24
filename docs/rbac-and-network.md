@@ -23,13 +23,13 @@ rules:
     verbs: ["get", "list", "watch", "create", "patch", "delete"]   # kubectl apply/wait/delete
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "patch"]                        # patch: keeps the pod's name/agent/state labels current (optional)
   - apiGroups: [""]
     resources: ["pods/exec"]
     verbs: ["create"]                                               # seed + provider stdio
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "delete"]                                # workspace volume: status and cleanup on archive
+    verbs: ["get", "list", "delete", "patch"]                       # workspace volume: status, cleanup on archive, labels (patch optional)
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]                                                  # debugging only

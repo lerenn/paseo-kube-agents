@@ -85,7 +85,7 @@ export function contributePodLocation(client: PluginClientContext): () => void {
         source: { kind: "directory", path: project.directory, projectId: project.id },
         title: `${project.name}-${slug}`,
         idempotencyKey,
-        runtime: { id: RUNTIME_ID, options: runtimeOptions(project.directory, slug, ref) },
+        runtime: { id: RUNTIME_ID, options: runtimeOptions(project.directory, slug, ref, `${project.name}-${slug}`) },
       } as never);
       return { workspaceId: workspace.id };
     },

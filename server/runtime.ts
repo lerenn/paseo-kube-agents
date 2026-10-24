@@ -1,12 +1,13 @@
 import { randomBytes } from "node:crypto";
 import type { Readable } from "node:stream";
 import { parseRuntimeOptions, type RuntimeOptions } from "../shared/runtime-options.js";
+import { applyFetch, fetchTargets, type FetchTarget } from "./mirrors.js";
 import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
 import type { KubernetesRuntimeConfig } from "./config.js";
 import { type GitRunner, runGit } from "./git.js";
 import type { Kube, SandboxInfo } from "./kube.js";
 import { LAUNCH_SCRIPT } from "./pod-assets.js";
-import { ensureCommand, installAssets, seedWorkspace, writeEnvFile } from "./pod-setup.js";
+import { ensureCommand, initSubmodules, installAssets, seedWorkspace, setupMirrors, writeEnvFile } from "./pod-setup.js";
 import { waitPodReady } from "./pod-wait.js";
 import { PodRegistry, type PodState } from "./registry.js";
 import type {
@@ -23,8 +24,14 @@ import type {
 import {
   CWD_ANNOTATION,
   DAEMON_LABEL,
+  HOME_DIR,
+  REPO_LABEL,
+  WORKSPACE_ID_LABEL,
   WORKSPACE_LABEL,
   buildSandbox,
+  metaPatch,
+  type PodMeta,
+  type PodState as MetaState,
   resumePatch,
   sandboxName,
   suspendPatch,
@@ -74,6 +81,13 @@ interface WorkspaceState {
   phase: PodState | "none";
   bridge?: RunningBridge;
   ports: Set<number>;
+  /** Remotes the pod may fetch from (the project's origin and its submodules), served through the bridge. */
+  targets: FetchTarget[];
+  /** What the Sandbox, pod and claim were last labelled with, so they are only patched when it changes. */
+  repo?: string;
+  repoUrl?: string;
+  agent?: string;
+  labelled?: string;
   /** The pod the pod-side setup was last verified for; a replacement pod has another uid and is set up again. */
   readyUid?: string;
   commands: Set<string>;
@@ -128,7 +142,7 @@ export class KubernetesRuntime {
     const config = await this.deps.getConfig();
     const kube = this.deps.kubeFor(config);
     for (const sandbox of await kube.listSandboxes(`${DAEMON_LABEL}=${this.deps.daemonId}`)) {
-      const id = sandbox.labels[WORKSPACE_LABEL];
+      const id = sandbox.labels[WORKSPACE_ID_LABEL] ?? (sandbox.labels[WORKSPACE_LABEL]?.startsWith("wks_") ? sandbox.labels[WORKSPACE_LABEL] : undefined);
       const cwd = sandbox.annotations[CWD_ANNOTATION];
       if (!id || !cwd || this.states.has(id)) continue;
       const ws = this.newState(id, { cwd });
@@ -143,6 +157,7 @@ export class KubernetesRuntime {
       options,
       phase: "none",
       ports: new Set(),
+      targets: [],
       commands: new Set(),
       agents: new Map(),
       lastActivity: this.now(),
@@ -187,6 +202,7 @@ export class KubernetesRuntime {
     const plan = clonePlan(ws.options);
     const made = await (this.deps.seeder ?? this.defaultSeeder)(cwd, plan, repo.branch);
     try {
+      await this.refreshTargets(kube, ws, pod, [made.seed.sha]);
       await seedWorkspace(kube, pod, made.seed, made.bundle, {
         dir: cwd,
         originUrl: repo.url,
@@ -194,9 +210,24 @@ export class KubernetesRuntime {
         newBranch: plan?.action === "branch-off" && plan.slug ? plan.slug : undefined,
       });
       await made.done;
+      const subs = await initSubmodules(kube, pod, cwd, ws.targets);
+      if (!subs.ok) ctx.notice(`Could not fetch the submodules (run \`git submodule update --init\` in the pod to retry): ${subs.message}`, "warning");
     } finally {
       await made.release().catch(() => undefined);
     }
+  }
+
+  /** Tells git in the pod which remotes it may fetch from (origin and the submodules at HEAD and at the seed commit). */
+  private async refreshTargets(kube: Kube, ws: WorkspaceState, pod: string, shas: string[] = []): Promise<void> {
+    const { cwd } = ws.options;
+    const head = await this.git(["rev-parse", "HEAD"], { cwd }).catch(() => null);
+    const all = [...shas];
+    if (head?.code === 0) all.push(head.stdout.trim());
+    const seeded = shas.length ? null : await kube.exec(pod, ["cat", `${HOME_DIR}/seed.sha`]).catch(() => null);
+    if (seeded?.code === 0 && seeded.stdout.trim()) all.push(seeded.stdout.trim());
+    const repo = await (this.deps.detectRepo ?? detectRepo)(cwd);
+    ws.targets = await fetchTargets(this.git, cwd, repo.url, all);
+    await setupMirrors(kube, pod, cwd, ws.targets);
   }
 
   private defaultSeeder = async (cwd: string, plan: ClonePlan | null, currentBranch: string): Promise<SeedBundle> => {
@@ -212,7 +243,10 @@ export class KubernetesRuntime {
       kube,
       ws.sandbox!,
       [...ports],
-      { handle: (request) => applyPush(this.git, ws.options.cwd, request) },
+      {
+        handle: (request) =>
+          request.op === "fetch" ? applyFetch(this.git, ws.options.cwd, request, ws.targets) : applyPush(this.git, ws.options.cwd, request),
+      },
       { mapPort: this.deps.mapTunnelPort },
     );
   }
@@ -232,21 +266,28 @@ export class KubernetesRuntime {
     // Fast path: the same pod is up and everything this launch needs is already in place.
     if (ws.sandbox && ws.phase === "running" && ws.readyUid && !grows && (!need.command || ws.commands.has(need.command))) {
       const info = await kube.podInfo(ws.sandbox).catch(() => null);
-      if (info?.ready && !info.terminating && info.uid === ws.readyUid) return;
+      if (info?.ready && !info.terminating && info.uid === ws.readyUid) {
+        await this.syncLabels(kube, ws, "running"); // another agent may have started in this workspace
+        return;
+      }
     }
 
     let sandbox: SandboxInfo | undefined;
-    if (ws.sandbox) sandbox = (await kube.listSandboxes(`${WORKSPACE_LABEL}=${ws.id}`)).find((s) => s.name === ws.sandbox);
-    sandbox ??= (await kube.listSandboxes(`${WORKSPACE_LABEL}=${ws.id}`))[0];
+    if (ws.sandbox) sandbox = (await kube.listSandboxes(`${WORKSPACE_ID_LABEL}=${ws.id}`)).find((s) => s.name === ws.sandbox);
+    sandbox ??= (await kube.listSandboxes(`${WORKSPACE_ID_LABEL}=${ws.id}`))[0];
 
     if (!sandbox) {
       ctx.notice("Starting the pod...");
       const repo = await (this.deps.detectRepo ?? detectRepo)(cwd);
       const name = sandboxName(ws.id, repoName(repo.url), ws.options.slug);
-      await kube.apply(buildSandbox({ name, workspaceId: ws.id, cwd, config, daemonId: this.deps.daemonId }));
+      ws.repo = repoName(repo.url);
+      ws.repoUrl = repo.url;
+      await kube.apply(buildSandbox({ name, workspaceId: ws.id, cwd, config, daemonId: this.deps.daemonId, meta: this.meta(ws, "running") }));
+      ws.labelled = this.metaKey(this.meta(ws, "running"));
       ws.sandbox = name;
     } else {
       ws.sandbox = sandbox.name;
+      ws.repo ??= sandbox.labels[REPO_LABEL];
       if (sandbox.operatingMode === "Suspended") {
         ctx.notice("Resuming the pod...");
         this.setPhase(ws, "resuming");
@@ -264,16 +305,18 @@ export class KubernetesRuntime {
         onProblem: (problem) => ctx.notice(problem, "warning"),
       });
       await installAssets(kube, pod);
+      if (!ws.bridge || grows || ws.readyUid !== info.uid) this.startBridge(kube, ws, wanted); // before seeding: submodules are fetched through it
       await this.seedIfEmpty(kube, ws, pod, ctx);
+      await this.refreshTargets(kube, ws, pod);
       if (need.command && !ws.commands.has(need.command)) {
         ctx.notice(`Checking ${need.command} in the pod...`);
         await ensureCommand(kube, pod, need.command);
         ws.commands.add(need.command);
       }
-      if (!ws.bridge || grows || ws.readyUid !== info.uid) this.startBridge(kube, ws, wanted);
       ws.readyUid = info.uid;
       this.setPhase(ws, "running");
       ws.lastActivity = this.now();
+      await this.syncLabels(kube, ws, "running");
     } catch (error) {
       ws.readyUid = undefined;
       // Left suspended-looking so the next input retries from a clean state; the volume and the sandbox stay.
@@ -288,6 +331,46 @@ export class KubernetesRuntime {
     }
   }
 
+  private meta(ws: WorkspaceState, state: MetaState): PodMeta {
+    return {
+      workspaceName: ws.options.title ?? ws.options.slug ?? ws.id,
+      repo: ws.repo ?? "repo",
+      ...(ws.repoUrl ? { repoUrl: ws.repoUrl } : {}),
+      ...(ws.agent ? { agent: ws.agent } : {}),
+      state,
+    };
+  }
+
+  private metaKey = (meta: PodMeta) => JSON.stringify(meta);
+
+  /**
+   * Keeps the human-readable labels (workspace, agent, repo, state) on the Sandbox, its pod and its volume claim
+   * current. Best effort: the Sandbox is always patched; the pod and claim need `patch` on them in the daemon's Role.
+   */
+  private async syncLabels(kube: Kube, ws: WorkspaceState, state: MetaState): Promise<void> {
+    if (!ws.sandbox) return;
+    const meta = this.meta(ws, state);
+    const key = this.metaKey(meta);
+    if (ws.labelled === key) return;
+    ws.labelled = key;
+    await kube.patchSandbox(ws.sandbox, metaPatch(meta)).catch(() => undefined);
+    const { labels, annotations } = metaPatch(meta).metadata as { labels: Record<string, string>; annotations: Record<string, string> };
+    if (state === "running") await kube.label("pod", ws.sandbox, labels, annotations).catch(() => undefined);
+    await kube.label("pvc", workspaceClaimName(ws.sandbox), labels, annotations).catch(() => undefined);
+  }
+
+  /** Brings the labels of every workspace in line with its current name in Paseo (renames). */
+  async syncNames(names: ReadonlyMap<string, string>): Promise<void> {
+    const config = await this.deps.getConfig();
+    const kube = this.deps.kubeFor(config);
+    for (const ws of this.states.values()) {
+      const name = names.get(ws.id);
+      if (!name || !ws.sandbox || name === (ws.options.title ?? ws.options.slug)) continue;
+      ws.options = { ...ws.options, title: name };
+      await this.syncLabels(kube, ws, ws.phase === "suspended" ? "suspended" : "running").catch(() => undefined);
+    }
+  }
+
   private async suspend(ws: WorkspaceState): Promise<void> {
     if (!ws.sandbox || ws.phase !== "running") return;
     const config = await this.deps.getConfig();
@@ -298,6 +381,7 @@ export class KubernetesRuntime {
     ws.readyUid = undefined;
     ws.commands.clear();
     this.setPhase(ws, "suspended"); // before the pod goes: processes that end with it are reported as runtime-lost
+    await this.syncLabels(kube, ws, "suspended");
     await kube.patchSandbox(ws.sandbox, suspendPatch());
   }
 
@@ -335,6 +419,7 @@ export class KubernetesRuntime {
 
   async prepare(request: WorkspaceRuntimePrepareRequest, ctx: WorkspaceRuntimeContext): Promise<void> {
     const ws = this.workspace(request);
+    ws.agent = request.env.PASEO_AGENT_ID?.slice(0, 8) ?? ws.agent;
     await this.serial(ws, () => this.ensureReady(ws, ctx, { command: request.argv[0], mcpServers: request.mcpServers, env: request.env }));
   }
 
@@ -362,7 +447,7 @@ export class KubernetesRuntime {
     const ws = this.workspace(request);
     const config = await this.deps.getConfig();
     const kube = this.deps.kubeFor(config);
-    const sandbox = (await kube.listSandboxes(`${WORKSPACE_LABEL}=${ws.id}`))[0];
+    const sandbox = (await kube.listSandboxes(`${WORKSPACE_ID_LABEL}=${ws.id}`))[0];
     if (!sandbox) return { state: "absent" };
     if (sandbox.operatingMode === "Suspended") return { state: "suspended" };
     const pod = await kube.podInfo(sandbox.name).catch(() => null);
@@ -377,7 +462,7 @@ export class KubernetesRuntime {
       const config = await this.deps.getConfig();
       const kube = this.deps.kubeFor(config);
       ws.bridge?.close();
-      for (const sandbox of await kube.listSandboxes(`${WORKSPACE_LABEL}=${ws.id}`)) {
+      for (const sandbox of await kube.listSandboxes(`${WORKSPACE_ID_LABEL}=${ws.id}`)) {
         await kube.delete("sandbox", sandbox.name);
         await kube.delete("pvc", workspaceClaimName(sandbox.name)).catch(() => undefined);
       }

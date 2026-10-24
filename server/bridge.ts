@@ -1,14 +1,19 @@
 import { type Socket, connect } from "node:net";
 import type { AcpStreamMessage } from "@getpaseo/plugin/server/acp";
 import { type GitRunner, scrub } from "./git.js";
+import type { FetchRequest } from "./mirrors.js";
 import type { Kube } from "./kube.js";
 
 export interface BridgeReply {
   ok?: boolean;
   message?: string;
+  refs?: [string, string][];
+  head?: string;
+  pack?: string;
 }
 
-export type BridgeRequest = { op: "push"; ref: string; old: string; new: string; base: string; pack: string };
+export type PushRequest = { op: "push"; ref: string; old: string; new: string; base: string; pack: string };
+export type BridgeRequest = PushRequest | FetchRequest;
 
 export interface BridgeHandlers {
   handle(request: BridgeRequest): Promise<BridgeReply>;
@@ -33,7 +38,7 @@ const MAX_PACK_BYTES = 64 * 1024 * 1024;
 export async function applyPush(
   git: GitRunner,
   projectDir: string,
-  request: Extract<BridgeRequest, { op: "push" }>,
+  request: PushRequest,
 ): Promise<BridgeReply> {
   const { ref, new: sha, old, base } = request;
   if (!BRANCH_REF.test(ref) || ref.includes("..")) return { ok: false, message: `kube-agents: refusing to push ${ref}: only branches are pushed from pods` };

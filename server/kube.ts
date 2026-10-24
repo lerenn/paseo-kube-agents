@@ -88,6 +88,8 @@ export interface Kube {
   exec(pod: string, argv: string[]): Promise<ExecResult>;
   /** Merge-patches a Sandbox (suspend, resume, claim from the pool). */
   patchSandbox(name: string, patch: Record<string, unknown>): Promise<void>;
+  /** Sets labels and annotations on a pod or volume claim (`kubectl label/annotate --overwrite`). */
+  label(kind: "pod" | "pvc", name: string, labels: Record<string, string>, annotations?: Record<string, string>): Promise<void>;
   /** Sandboxes matching a label selector. */
   listSandboxes(selector: string): Promise<SandboxInfo[]>;
   /** Volume claims matching a label selector (all claims in the namespace when omitted). */
@@ -265,6 +267,13 @@ export class Kubectl implements Kube {
 
   async patchSandbox(name: string, patch: Record<string, unknown>): Promise<void> {
     await this.ok(["patch", "sandbox", name, "--type=merge", "-p", JSON.stringify(patch)]);
+  }
+
+  async label(kind: "pod" | "pvc", name: string, labels: Record<string, string>, annotations: Record<string, string> = {}): Promise<void> {
+    await this.ok(["label", kind, name, "--overwrite", ...Object.entries(labels).map(([k, v]) => `${k}=${v}`)]);
+    if (Object.keys(annotations).length) {
+      await this.ok(["annotate", kind, name, "--overwrite", ...Object.entries(annotations).map(([k, v]) => `${k}=${v}`)]);
+    }
   }
 
   async listSandboxes(selector: string): Promise<SandboxInfo[]> {

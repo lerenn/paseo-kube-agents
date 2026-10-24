@@ -20,6 +20,7 @@ function setup(settings: object = {}, extra: object = {}, kube = new FakeKube())
     registry,
     seeder: fakeSeeder,
     detectRepo: repo,
+    git: async () => ({ code: 1, stdout: "", stderr: "" }),
     sleep: async () => undefined,
     now: () => clock++, // every read moves the clock a little, so a pod that never becomes ready times out
     ticker: () => () => undefined,
@@ -63,9 +64,9 @@ describe("prepare: the pod is created when the first process is about to start",
     await t.prepare();
     const sandbox = t.kube.applied[0] as any;
     expect(sandbox.metadata.name).toMatch(/^pka-x-brave-otter-12-[0-9a-f]{6}$/);
-    expect(sandbox.metadata.labels).toMatchObject({ "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace": "wks_1" });
+    expect(sandbox.metadata.labels).toMatchObject({ "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace-id": "wks_1", "paseo.sh/workspace": "brave-otter-12", "paseo.sh/repo": "x", "paseo.sh/state": "running" });
     expect(sandbox.metadata.annotations["paseo.sh/cwd"]).toBe(CWD);
-    expect(sandbox.spec.volumeClaimTemplates[0].metadata.labels).toMatchObject({ "paseo.sh/workspace": "wks_1" });
+    expect(sandbox.spec.volumeClaimTemplates[0].metadata.labels).toMatchObject({ "paseo.sh/workspace-id": "wks_1" });
     const mounts = sandbox.spec.podTemplate.spec.containers[0].volumeMounts;
     expect(mounts).toContainEqual({ name: "workspace", mountPath: "/workspace" });
     expect(mounts).toContainEqual({ name: "workspace", mountPath: CWD, subPath: "checkout" }); // same absolute path as on the daemon
@@ -176,6 +177,29 @@ describe("exec: real provider processes in the pod", () => {
   });
 });
 
+describe("labels for people", () => {
+  it("labels with the agent that ran, follows suspension and renames, and patches the pod and claim too", async () => {
+    const t = setup({ podIdleMinutes: 30 });
+    await t.prepare({ env: { PASEO_AGENT_ID: "0c0f7a18-aaaa-bbbb" } });
+    expect((t.kube.applied[0] as any).metadata.labels).toMatchObject({ "paseo.sh/agent": "0c0f7a18", "paseo.sh/state": "running" });
+    const last = () => t.kube.patches2.filter((p) => p.patch.metadata).at(-1)!.patch.metadata.labels;
+
+    // another agent starts in the same workspace: the labels follow it
+    await t.prepare({ env: { PASEO_AGENT_ID: "99999999-aaaa" } });
+    expect(last()).toMatchObject({ "paseo.sh/agent": "99999999", "paseo.sh/state": "running", "paseo.sh/workspace": "brave-otter-12" });
+    expect(t.kube.labelled.some((l) => l.kind === "pod" && l.labels["paseo.sh/agent"] === "99999999")).toBe(true);
+    expect(t.kube.labelled.some((l) => l.kind === "pvc")).toBe(true);
+
+    await t.runtime.syncNames(new Map([["wks_1", "Fix the login"]]));
+    expect(last()).toMatchObject({ "paseo.sh/workspace": "Fix-the-login" });
+
+    t.advance(31 * MIN);
+    await t.tick();
+    expect(last()).toMatchObject({ "paseo.sh/state": "suspended" });
+    expect(t.kube.labelled.at(-1)).toMatchObject({ kind: "pvc", labels: { "paseo.sh/state": "suspended" } });
+  });
+});
+
 describe("suspend, resume and destroy", () => {
   it("suspends a workspace whose agents have all been idle, keeping the volume and giving it no expiry", async () => {
     const t = setup({ podIdleMinutes: 30 });
@@ -230,7 +254,7 @@ describe("suspend, resume and destroy", () => {
     await t.prepare();
     t.advance(31 * MIN);
     await t.tick();
-    const seeds = () => t.kube.execs.filter((e) => e.argv[2]?.includes("git init")).length;
+    const seeds = () => t.kube.execs.filter((e) => e.argv[2]?.includes('git init -q "$dir"')).length;
     const before = seeds();
     t.kube.hasClone = true;
     await t.reg.beforeInput!({ ...t.base, agentId: "a1" }, t.ctx);

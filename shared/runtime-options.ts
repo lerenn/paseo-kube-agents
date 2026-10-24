@@ -6,6 +6,8 @@ export const RuntimeOptionsSchema = z.object({
   cwd: z.string().startsWith("/").refine((p) => p !== "/" && p !== "/workspace", "Pick a project directory"),
   /** Paseo's worktree slug for the draft: names the pod and the new branch. */
   slug: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$/).optional(),
+  /** The workspace's name in Paseo; labels the pod. Kept current by the reconciler when the workspace is renamed. */
+  title: z.string().max(200).optional(),
   /** The branch picker's choice. */
   ref: z
     .object({

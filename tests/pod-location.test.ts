@@ -70,7 +70,7 @@ describe("pod workspace location", () => {
       source: { kind: "directory", path: "/home/me/repo", projectId: "p1" },
       title: "repo-brave-otter-12",
       idempotencyKey: "k",
-      runtime: { id: "kubernetes", options: { cwd: "/home/me/repo", slug: "brave-otter-12", ref: { action: "branch-off", refName: "refs/heads/main" } } },
+      runtime: { id: "kubernetes", options: { cwd: "/home/me/repo", slug: "brave-otter-12", ref: { action: "branch-off", refName: "refs/heads/main" }, title: "repo-brave-otter-12" } },
     });
   });
 
