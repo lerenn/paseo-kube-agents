@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { Readable } from "node:stream";
 import { parseRuntimeOptions, type RuntimeOptions } from "../shared/runtime-options.js";
-import { applyFetch, fetchTargets, type FetchTarget } from "./mirrors.js";
+import { applyFetch, fetchTargets, pushToMirror, type FetchTarget } from "./mirrors.js";
 import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
 import type { KubernetesRuntimeConfig } from "./config.js";
 import { type GitRunner, runGit, scrub } from "./git.js";
@@ -236,7 +236,7 @@ export class KubernetesRuntime {
     const raw = await this.git(["remote", "get-url", "origin"], { cwd }).catch(() => null);
     const originUrl = raw?.code === 0 && raw.stdout.trim() ? raw.stdout.trim() : (await (this.deps.detectRepo ?? detectRepo)(cwd)).url;
     ws.targets = await fetchTargets(this.git, cwd, originUrl, all);
-    await setupMirrors(kube, pod, cwd, ws.targets);
+    await setupMirrors(kube, pod, cwd, await this.identity(cwd), ws.targets);
   }
 
   private defaultSeeder = async (cwd: string, plan: ClonePlan | null, currentBranch: string): Promise<SeedBundle> => {
@@ -254,7 +254,11 @@ export class KubernetesRuntime {
       [...ports],
       {
         handle: (request) =>
-          request.op === "fetch" ? applyFetch(this.git, ws.options.cwd, request, ws.targets) : applyPush(this.git, ws.options.cwd, request),
+          request.op === "fetch"
+            ? applyFetch(this.git, ws.options.cwd, request, ws.targets)
+            : request.mirror
+              ? pushToMirror(this.git, ws.options.cwd, request, ws.targets)
+              : applyPush(this.git, ws.options.cwd, request),
       },
       { mapPort: this.deps.mapTunnelPort },
     );

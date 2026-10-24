@@ -41,8 +41,11 @@ Paseo daemon                                   cluster (paseo-agents)
   submodule, with `remote.origin.uploadpack` set to a wrapper that, before serving a fetch, asks the plugin over the
   bridge to refresh the mirror: the daemon fetches the real remote with its own credentials and sends a thin pack of
   only what the pod lacks. Branches, tags and the default branch come across; `origin/HEAD` resolves. Only the origin
-  and the submodules recorded in the project are fetchable (nothing else is reachable), and pushing to a submodule's
-  mirror is refused. Limits: 64MB per fetch, no nested submodules, pull request refs (`refs/pull/*`) are not mirrored.
+  and the submodules recorded in the project are fetchable (nothing else is reachable), and branches can be pushed to a submodule's remote the same way as to the project's
+  (applied and pushed by the daemon with its credentials; no deletions, and the remote still refuses non-fast-forward
+  pushes). Git in the pod uses the daemon's `user.name`/`user.email`. A submodule is checked out detached, as git does:
+  `git switch -c <branch>` in it before committing (or check out the branch `.gitmodules` tracks). Seeded branches track
+  their remote branch, so a plain `git pull` works, and the first push of a new branch sets its upstream. Limits: 64MB per fetch, no nested submodules, pull request refs (`refs/pull/*`) are not mirrored.
 - **Push-back.** `git push` goes to a local "outbox" repository whose `pre-receive` hook asks the plugin, over the
   same bridge, to push the new commits from the daemon with the daemon's git credentials (branches only, no
   deletions). `gh` and GitHub tools go through the GitHub Proxy plugin if it is installed and the agent is opted in

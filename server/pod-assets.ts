@@ -24,6 +24,7 @@ if (mode === "call") {
   const msg = { op };
   if (op === "push") {
     msg.ref = args[1]; msg.old = args[2]; msg.new = args[3]; msg.base = args[4];
+    if (args[5]) msg.mirror = args[5];
     msg.pack = Buffer.concat(chunks).toString("base64");
   }
   if (op === "fetch") {
@@ -167,10 +168,22 @@ node "$HOME/bridge.mjs" call fetch "$dir" </dev/null >&2 || exit 1
 exec git-upload-pack "$dir"
 `;
 
-/** Mirrors only serve fetches; pushes (for example from a submodule) must not silently land in them. */
+/**
+ * pre-receive hook of a mirror (the pod's copy of a submodule's remote). A branch pushed there is sent to the
+ * real remote by the plugin, like the project's own pushes; deletions are refused.
+ */
 export const MIRROR_PRE_RECEIVE = String.raw`#!/bin/sh
-echo "kube-agents: pushing to this remote is not supported from a pod; only the project's own branches can be pushed" >&2
-exit 1
+ZERO=0000000000000000000000000000000000000000
+id=$(basename "$(pwd)" .git)
+while read old new ref; do
+  if [ "$new" = "$ZERO" ]; then
+    echo "kube-agents: deleting remote branches from a pod is not supported" >&2
+    exit 1
+  fi
+  { echo "$new"; git for-each-ref --format='^%(objectname)'; } | git pack-objects --revs --stdout --thin 2>/dev/null \
+    | node "$HOME/bridge.mjs" call push "$ref" "$old" "$new" "$old" "$id" || exit 1
+done
+exit 0
 `;
 
 /**
