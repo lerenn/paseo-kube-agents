@@ -13,6 +13,13 @@ export const kubeStatus = defineRpc({
       starting: z.number(),
       asleepSince: z.string().optional(),
     }),
+    reaper: z.object({
+      lastRunAt: z.string().optional(),
+      removed: z.number(),
+      removedTotal: z.number(),
+      unlabelled: z.array(z.string()),
+      error: z.string().optional(),
+    }),
     pods: z.array(
       z.object({
         sessionId: z.string(),

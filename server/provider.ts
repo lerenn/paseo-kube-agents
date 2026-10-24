@@ -15,7 +15,7 @@ const execFileAsync = promisify(execFile);
  */
 export function createProvider(
   getConfig: () => Promise<KubeAgentsConfig>,
-  runtime: { pool?: ConnectionDeps["pool"]; registry?: PodRegistry } = {},
+  runtime: { pool?: ConnectionDeps["pool"]; registry?: PodRegistry; daemonId?: string } = {},
 ): ProviderRegistration {
   return {
     id: "kube-agents",
@@ -36,6 +36,7 @@ export function createProvider(
         config,
         kube,
         pool: runtime.pool,
+        daemonId: runtime.daemonId,
         registry: runtime.registry,
         acpProvider: (connector) =>
           runAcpProvider({

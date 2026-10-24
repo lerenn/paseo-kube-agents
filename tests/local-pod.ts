@@ -40,6 +40,9 @@ export class LocalPodKube implements Kube {
   async applySecretKey() {}
   async removeSecretKey() {}
   async patchSandbox() {}
+  async listClaims() {
+    return [];
+  }
   async listSandboxes() {
     return [];
   }

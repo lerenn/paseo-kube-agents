@@ -53,6 +53,7 @@ async function openSession(env: Record<string, string> = {}, mcpServers: Record<
       config: ConfigSchema.parse({ readyTimeoutSeconds: 5 }),
       kube,
       acpProvider: acp.provider,
+      eager: true,
       mapTunnelPort: tunnel ? (p) => (p === tunnel.pod ? tunnel.daemon : p) : undefined,
     },
   );

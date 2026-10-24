@@ -41,6 +41,20 @@ export interface SandboxInfo {
   createdAt?: string;
 }
 
+export interface ClaimInfo {
+  name: string;
+  labels: Record<string, string>;
+  createdAt?: string;
+}
+
+export function parseClaimList(json: any): ClaimInfo[] {
+  return (json?.items ?? []).map((item: any) => ({
+    name: item.metadata.name,
+    labels: item.metadata.labels ?? {},
+    createdAt: item.metadata.creationTimestamp,
+  }));
+}
+
 export function parseSandboxList(json: any): SandboxInfo[] {
   return (json?.items ?? []).map((item: any) => ({
     name: item.metadata.name,
@@ -67,6 +81,8 @@ export interface Kube {
   patchSandbox(name: string, patch: Record<string, unknown>): Promise<void>;
   /** Sandboxes matching a label selector. */
   listSandboxes(selector: string): Promise<SandboxInfo[]>;
+  /** Volume claims matching a label selector (all claims in the namespace when omitted). */
+  listClaims(selector?: string): Promise<ClaimInfo[]>;
   /** Runs a command in the pod with `input` on its stdin (used to copy files in over the Kubernetes API). */
   execInput(pod: string, argv: string[], input: Readable): Promise<ExecResult>;
   /** Long-lived stdio JSON-RPC (ndjson) stream to a process inside the pod. */
@@ -228,6 +244,11 @@ export class Kubectl implements Kube {
   async listSandboxes(selector: string): Promise<SandboxInfo[]> {
     const result = await this.ok(["get", "sandbox", "-l", selector, "-o", "json"]);
     return parseSandboxList(JSON.parse(result.stdout));
+  }
+
+  async listClaims(selector?: string): Promise<ClaimInfo[]> {
+    const result = await this.ok(["get", "pvc", ...(selector ? ["-l", selector] : []), "-o", "json"]);
+    return parseClaimList(JSON.parse(result.stdout));
   }
 
   async removeSecretKey(secret: string, key: string): Promise<void> {

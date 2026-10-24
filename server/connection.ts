@@ -13,7 +13,7 @@ import type { AcpConnector } from "@getpaseo/plugin/server/acp";
 import type { KubeAgentsConfig } from "./config.js";
 import type { Kube } from "./kube.js";
 import { PodRegistry, type PodState } from "./registry.js";
-import { NATIVE_LABEL, SESSION_LABEL, buildSandbox, nativeSessionId, resumePatch, sandboxName, sessionLabel, suspendPatch, workspaceClaimName } from "./sandbox.js";
+import { ACP_ANNOTATION, NATIVE_LABEL, SESSION_LABEL, buildSandbox, nativeSessionId, resumePatch, sandboxName, sessionLabel, suspendPatch, usedPatch, workspaceClaimName } from "./sandbox.js";
 import { REF_ENV_KEYS } from "../shared/pod-ref.js";
 import { createCatalogSource } from "./catalog.js";
 import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
@@ -62,9 +62,17 @@ export interface ConnectionDeps {
   /** Builds the seed bundle from the daemon's checkout (injected for tests). */
   seeder?: (cwd: string, plan: ClonePlan | null, currentBranch: string) => Promise<SeedBundle>;
   /** Pre-started pods for new agents (see WarmPool); absent when pooling is not wired. */
-  pool?: { noteRequest(): void; claim(sessionId: string): Promise<string | null> };
+  pool?: { noteRequest(): void; claim(sessionId: string, agentId?: string, handleId?: string): Promise<string | null> };
+  /** This daemon's id, written on every sandbox and volume claim so the reaper only ever considers its own. */
+  daemonId?: string;
   /** Where session states are published for the Kube Agents screen. */
   registry?: PodRegistry;
+  /**
+   * Create the pod when the session opens instead of at its first message. Only tests turn this on: in
+   * production an opened session costs nothing until it is used, because Paseo opens many sessions that
+   * never run (drafts, feature previews, every agent again after a daemon restart).
+   */
+  eager?: boolean;
   /** Calls `fn` every `ms` until the returned stop function runs (injected for tests). */
   ticker?: (fn: () => void, ms: number) => () => void;
   /** Clock and sleep for pod polling (injected for tests). */
@@ -83,7 +91,16 @@ export interface SeedBundle {
 type SessionConfig = Extract<ProviderInput, { type: "session.open" }>["config"];
 
 interface PodSession {
+  /** Empty until the pod is first needed. */
   sandbox: string;
+  /** True while the session is open but no sandbox exists yet; the first message creates it. */
+  deferred: boolean;
+  repo: RepoRef;
+  plan: ReturnType<typeof parseClonePlan>;
+  agentId?: string;
+  slug?: string;
+  /** The sandbox was created for this session by this plugin: a failed start removes it again. */
+  fresh?: boolean;
   localCwd: string;
   podCwd: string;
   /** The session config to reopen on a replacement pod: the daemon-side tool policy is never sent on. */
@@ -94,8 +111,10 @@ interface PodSession {
   stopForwarding: () => void;
   /** The agent's own session handle, so a replacement pod can resume the conversation. */
   persistence?: ProviderPersistence;
-  /** The native session id already written to the sandbox label. */
-  nativeLabelled?: string;
+  /** What Paseo saves to reopen this agent: minted here, stable, never the agent process's own handle. */
+  handle: ProviderPersistence;
+  /** The agent process's own session handle last written to the sandbox. */
+  acpWritten?: string;
   turnId?: string;
   /** Running, suspended (pod deleted, volume kept) or coming back. */
   state: PodState;
@@ -107,11 +126,15 @@ interface PodSession {
   pendingPermissions: number;
   /** The resume in flight, shared so inputs that arrive meanwhile queue behind it. */
   resuming?: Promise<void>;
+  /** Tail of the queue of inputs being prepared for delivery (first come, first served). */
+  prep: Promise<void>;
   /** False until Paseo's open request has completed; failures before that are not recoverable. */
   opened: boolean;
   recovering: boolean;
   /** True while the agent session is being reopened on a replacement pod. */
   reopening: boolean;
+  /** Settles when the agent process has opened (or failed to open) the session being reopened. */
+  reopenWaiter?: { requestId: string; settle: (error?: Error) => void };
   closing: boolean;
   /** Timestamps of recent recoveries, to stop a crash loop. */
   recoveries: number[];
@@ -157,9 +180,9 @@ export async function connectKube(
   let closed = false;
 
   const now = () => (deps.now ?? Date.now)();
-  const track = (sessionId: string, ps: PodSession, state: PodState) => {
+  const track = (sessionId: string, ps: PodSession, state: PodState, quiet = false) => {
     ps.state = state;
-    deps.registry?.set(sessionId, ps.sandbox, state, now());
+    if (!quiet && ps.sandbox) deps.registry?.set(sessionId, ps.sandbox, state, now());
   };
 
   const emit = (event: ProviderEvent) => {
@@ -236,19 +259,22 @@ export async function connectKube(
     return inner;
   }
 
-  /** Keeps the agent's handle, and labels the sandbox with it so a reopened session (new Paseo id) finds it. */
+  /** Keeps the agent process's own handle, on the sandbox too, so a later pod (or plugin) can resume its conversation. */
   function remember(ps: PodSession, persistence: ProviderPersistence): void {
     ps.persistence = persistence;
-    const native = nativeSessionId(persistence);
-    if (!native || ps.nativeLabelled === native) return;
-    ps.nativeLabelled = native;
-    void kube.patchSandbox(ps.sandbox, { metadata: { labels: { [NATIVE_LABEL]: sessionLabel(native) } } }).catch(() => undefined);
+    const serialized = JSON.stringify(persistence);
+    if (!ps.sandbox || ps.acpWritten === serialized) return;
+    ps.acpWritten = serialized;
+    void kube.patchSandbox(ps.sandbox, { metadata: { annotations: { [ACP_ANNOTATION]: serialized } } }).catch(() => undefined);
   }
 
   function onInnerEvent(sessionId: string, ps: PodSession, inner: ProviderConnection, event: ProviderEvent) {
     if (inner !== ps.inner) return;
     if (event.type === "session.opened" && event.persistence) remember(ps, event.persistence);
-    if (event.type === "session.persistence" && event.sessionId === sessionId) remember(ps, event.persistence);
+    if (event.type === "session.persistence" && event.sessionId === sessionId) {
+      remember(ps, event.persistence);
+      return; // Paseo keeps the handle this plugin gave it, not the agent process's
+    }
     if (event.type === "session.turn" && event.sessionId === sessionId) {
       ps.turnId = event.state === "started" ? event.turnId : undefined;
       ps.lastActivity = now();
@@ -266,10 +292,16 @@ export async function connectKube(
     // A pod that went away takes the agent process with it; resume on the replacement instead of
     // telling Paseo the session died.
     if (event.type === "session.runtime_failed" && event.sessionId === sessionId && ps.opened && !ps.closing) {
+      console.log(`[kube-agents] agent process failed in ${ps.sandbox}: ${event.error.message}${event.error.diagnostic ? ` (${event.error.diagnostic})` : ""}`);
       void recover(sessionId, ps);
       return;
     }
-    // Reopening on a replacement pod is internal: Paseo already has this session open.
+    // Reopening on a replacement pod is internal: Paseo already has this session open. A failed reopen is
+    // kept so the caller can report it instead of carrying on with a session the agent never opened.
+    if (ps.reopenWaiter && "requestId" in event && event.requestId === ps.reopenWaiter.requestId) {
+      if (event.type === "request.failed") ps.reopenWaiter.settle(new Error(event.error.message));
+      else if (event.type === "session.ready" || event.type === "session.opened") ps.reopenWaiter.settle();
+    }
     if ("requestId" in event && typeof event.requestId === "string" && event.requestId.startsWith("recover-")) return;
     if (ps.reopening && (event.type === "session.opened" || event.type === "session.ready")) return;
     // The ACP runtime cannot take Paseo's tool policy, so tools preapproved on the daemon are
@@ -289,7 +321,7 @@ export async function connectKube(
       }
     }
     if (event.type === "session.permission" && event.sessionId === sessionId) ps.pendingPermissions++;
-    emit(toLocal(event, sessionId, ps.podCwd, ps.localCwd, capabilities));
+    emit(toLocal(event, sessionId, ps.podCwd, ps.localCwd, capabilities, ps.handle));
   }
 
   /** Waits for the pod, makes sure the workspace is there, and reopens the agent's session in it. */
@@ -300,15 +332,32 @@ export async function connectKube(
     startPodBridge(ps);
     const inner = await startInner(sessionId, ps);
     ps.reopening = true;
+    const requestId = `recover-${Date.now()}`;
+    // The agent process opens the session after `send` returns: wait until it says so, or the first
+    // message would reach a session that does not exist yet.
+    const opened = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => settle(new Error("the agent did not open its session in time")), 190_000);
+      const settle = (error?: Error) => {
+        clearTimeout(timer);
+        ps.reopenWaiter = undefined;
+        error ? reject(error) : resolve();
+      };
+      ps.reopenWaiter = { requestId, settle };
+    });
+    opened.catch(() => undefined);
     try {
       await inner.send({
         type: "session.open",
-        requestId: `recover-${Date.now()}`,
+        requestId,
         sessionId,
         config: ps.config,
         history: "skip",
         ...(ps.persistence ? { persistence: ps.persistence } : {}),
       } as ProviderInput);
+      await opened;
+    } catch (error) {
+      ps.reopenWaiter?.settle(error as Error);
+      throw new Error(`the agent could not reopen its session: ${(error as Error).message}`);
     } finally {
       ps.reopening = false;
     }
@@ -337,26 +386,59 @@ export async function connectKube(
    * Recreates the pod on the same volume (current image and settings) and resumes the agent's session
    * from its saved handle. One resume at a time per agent: inputs that arrive meanwhile wait for it.
    */
+  /** Creates (or claims from the warm pool) the sandbox of a session that has been open without one. */
+  async function materialize(sessionId: string, ps: PodSession): Promise<void> {
+    deps.pool?.noteRequest();
+    const handleId = nativeSessionId(ps.handle);
+    const warm = await deps.pool?.claim(sessionId, ps.agentId, handleId).catch(() => null);
+    const name = warm ?? sandboxName(sessionId, repoName(ps.repo.url), ps.slug);
+    if (!warm) await kube.apply(buildSandbox({ name, sessionId, config, daemonId: deps.daemonId, agentId: ps.agentId, handleId }));
+    ps.sandbox = name;
+    ps.podCwd = podWorkdir(name);
+    ps.config = { ...ps.config, cwd: ps.podCwd };
+    ps.deferred = false;
+    ps.fresh = true;
+  }
+
+  /**
+   * Brings the agent's pod up and resumes its session from the saved handle: the first message of a new
+   * agent (the sandbox is created now), or any input after a suspension (the pod is recreated on the same
+   * volume). One at a time per agent: inputs that arrive meanwhile wait for it.
+   */
   function resume(sessionId: string, ps: PodSession): Promise<void> {
     if (ps.state === "running") return Promise.resolve();
     ps.resuming ??= (async () => {
-      track(sessionId, ps, "resuming");
-      notice(sessionId, "info", "Resuming the pod...");
+      const wasDeferred = ps.deferred;
+      track(sessionId, ps, "resuming", wasDeferred);
+      notice(sessionId, "info", wasDeferred ? "Starting the pod..." : "Resuming the pod...");
       try {
-        await kube.patchSandbox(ps.sandbox, resumePatch(config));
+        if (wasDeferred) await materialize(sessionId, ps);
+        else await kube.patchSandbox(ps.sandbox, resumePatch(config, ps.used));
+        track(sessionId, ps, "resuming");
         await reopenOnPod(sessionId, ps);
         ps.lastActivity = now();
+        ps.opened = true;
         track(sessionId, ps, "running");
-        notice(sessionId, "info", "Pod resumed");
+        notice(sessionId, "info", wasDeferred ? "Pod started" : "Pod resumed");
       } catch (error) {
-        // Back to suspended (and the pod released) so the next input retries from a clean state.
         ps.bridge?.close();
         await ps.inner?.close().catch(() => undefined);
-        await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used)).catch(() => undefined);
-        track(sessionId, ps, "suspended");
+        if (wasDeferred && ps.fresh && ps.sandbox) {
+          // Nothing of the agent's lives there yet: remove the sandbox and start from scratch next time.
+          await deleteSandbox(ps.sandbox).catch(() => undefined);
+          deps.registry?.delete(sessionId);
+          ps.sandbox = "";
+          ps.deferred = true;
+          ps.fresh = false;
+          ps.state = "suspended";
+        } else {
+          // Back to suspended (and the pod released) so the next input retries from a clean state.
+          await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used)).catch(() => undefined);
+          track(sessionId, ps, "suspended");
+        }
         const message = (error as Error).message;
-        notice(sessionId, "error", `Could not resume the pod: ${message}`);
-        throw new Error(`kube-agents: could not resume the pod: ${message}. Send a message again to retry.`);
+        notice(sessionId, "error", `Could not ${wasDeferred ? "start" : "resume"} the pod: ${message}`);
+        throw new Error(`kube-agents: could not ${wasDeferred ? "start" : "resume"} the pod: ${message}. Send a message again to retry.`);
       } finally {
         ps.resuming = undefined;
       }
@@ -427,6 +509,36 @@ export async function connectKube(
     }
   }
 
+  /** Answers Paseo's open request without a pod: the session is ready, and the catalog stands in for the agent's own config. */
+  async function announceOpen(input: Extract<ProviderInput, { type: "session.open" }>, ps: PodSession): Promise<void> {
+    const { sessionId, config: session } = input;
+    const cat = await catalog();
+    emit({
+      type: "session.opened",
+      requestId: input.requestId,
+      sessionId,
+      capabilities,
+      restoration: "core",
+      persistence: ps.handle,
+      cwd: ps.localCwd,
+      ...(session.title ? { title: session.title } : {}),
+    });
+    emit({
+      type: "session.config",
+      sessionId,
+      config: {
+        ...(session.model ? { model: session.model } : cat.defaultModel ? { model: cat.defaultModel } : {}),
+        ...(session.mode ? { mode: session.mode } : cat.defaultMode ? { mode: cat.defaultMode } : {}),
+        ...(session.thinkingOption ? { thinkingOption: session.thinkingOption } : {}),
+        models: cat.models,
+        modes: cat.modes,
+        thinkingOptions: cat.thinkingOptions ?? [],
+        settings: [],
+      },
+    });
+    emit({ type: "session.ready", requestId: input.requestId, sessionId });
+  }
+
   async function open(input: Extract<ProviderInput, { type: "session.open" }>): Promise<void> {
     const { sessionId, config: session } = input;
     const repo = await (deps.detectRepo ?? detectRepo)(session.cwd);
@@ -435,52 +547,91 @@ export async function connectKube(
 
     // The agent may already have a sandbox: the plugin restarted, or the agent was suspended. Adopt it,
     // so its volume (workspace and the agent's own session state) comes back with it.
+    const agentId = session.env.PASEO_KUBE_AGENT_ID || undefined;
     const native = nativeSessionId(input.persistence);
+    const handleId = native ?? sessionId;
+    const handle: ProviderPersistence = input.persistence ?? { version: 1, data: { sessionId } };
     const existing =
       (await kube.listSandboxes(`${SESSION_LABEL}=${sessionLabel(sessionId)}`).catch(() => []))[0] ??
       (native ? (await kube.listSandboxes(`${NATIVE_LABEL}=${sessionLabel(native)}`).catch(() => []))[0] : undefined);
+    const slug = session.env[REF_ENV_KEYS.slug];
+    const base = {
+      localCwd: session.cwd,
+      repo,
+      plan,
+      agentId,
+      slug,
+      toolPolicy: session.toolPolicy,
+      inner: undefined as unknown as ProviderConnection,
+      stopForwarding: () => undefined,
+      handle,
+      used: Boolean(input.persistence),
+      lastActivity: now(),
+      pendingPermissions: 0,
+      prep: Promise.resolve(),
+      recovering: false,
+      reopening: false,
+      closing: false,
+      recoveries: [] as number[],
+    };
+
+    // Opening a session costs nothing: Paseo opens many that never run (drafts, feature previews, every
+    // agent again after a daemon restart). The pod is created, or the suspended one resumed, by the first message.
+    if (!deps.eager && existing?.operatingMode !== "Running") {
+      const podCwd = existing ? podWorkdir(existing.name) : "";
+      const lazy: PodSession = {
+        ...base,
+        sandbox: existing?.name ?? "",
+        deferred: !existing,
+        podCwd,
+        config: { ...forwarded, cwd: podCwd },
+        persistence: acpHandle(existing?.annotations) ?? input.persistence,
+        state: "suspended",
+        opened: true,
+      };
+      sessions.set(sessionId, lazy);
+      if (existing) track(sessionId, lazy, "suspended");
+      await announceOpen(input, lazy);
+      return;
+    }
+
     let name: string;
     let created = false;
     if (existing) {
       name = existing.name;
     } else {
       deps.pool?.noteRequest();
-      const warm = await deps.pool?.claim(sessionId).catch(() => null);
+      const warm = await deps.pool?.claim(sessionId, agentId, handleId).catch(() => null);
       if (warm) {
         name = warm;
       } else {
-        name = sandboxName(sessionId, repoName(repo.url), session.env[REF_ENV_KEYS.slug]);
-        await kube.apply(buildSandbox({ name, sessionId, config }));
+        name = sandboxName(sessionId, repoName(repo.url), slug);
+        await kube.apply(buildSandbox({ name, sessionId, config, daemonId: deps.daemonId, agentId, handleId }));
       }
       created = true;
     }
     const podCwd = podWorkdir(name);
     const ps: PodSession = {
+      ...base,
+      persistence: acpHandle(existing?.annotations) ?? input.persistence,
       sandbox: name,
-      localCwd: session.cwd,
+      deferred: false,
       podCwd,
       config: { ...forwarded, cwd: podCwd },
-      toolPolicy: session.toolPolicy,
-      inner: undefined as unknown as ProviderConnection,
-      stopForwarding: () => undefined,
       state: "running",
-      used: Boolean(input.persistence),
-      lastActivity: now(),
-      pendingPermissions: 0,
       opened: false,
-      recovering: false,
-      reopening: false,
-      closing: false,
-      recoveries: [],
     };
     try {
-      if (existing?.operatingMode === "Suspended") await kube.patchSandbox(name, resumePatch(config));
+      if (existing?.operatingMode === "Suspended") await kube.patchSandbox(name, resumePatch(config, ps.used));
+      else if (ps.used) await kube.patchSandbox(name, usedPatch()).catch(() => undefined);
       await wait(name);
       await ensureWorkspace(ps, repo, plan);
       startPodBridge(ps);
       await startInner(sessionId, ps);
       sessions.set(sessionId, ps);
-      await ps.inner.send({ ...input, config: { ...forwarded, cwd: podCwd } });
+      // The agent process is opened with its own handle (kept on the sandbox), never the one Paseo saved.
+      const { persistence: _paseoHandle, ...openInput } = input;
+      await ps.inner.send({ ...openInput, ...(ps.persistence ? { persistence: ps.persistence } : {}), config: { ...forwarded, cwd: podCwd } });
       ps.opened = true;
       ps.lastActivity = now();
       track(sessionId, ps, "running");
@@ -510,8 +661,8 @@ export async function connectKube(
     deps.registry?.delete(sessionId);
     session.stopForwarding();
     session.bridge?.close();
-    await session.inner.close().catch(() => undefined);
-    await deleteSandbox(session.sandbox);
+    await session.inner?.close().catch(() => undefined);
+    if (!session.deferred && session.sandbox) await deleteSandbox(session.sandbox);
   }
 
   return {
@@ -570,8 +721,19 @@ export async function connectKube(
             return;
           }
           session.lastActivity = now();
-          if (input.type === "session.prompt") session.used = true;
-          await resume(input.sessionId, session); // a no-op while running; inputs during a resume queue behind it
+          // Preparation (marking the agent used, waking the pod) runs one input at a time, first come first
+          // served, so inputs reach the agent in the order they arrived. Delivery itself is not serialized:
+          // an interrupt or a permission answer must not wait behind a running turn.
+          const prepared = session.prep.then(async () => {
+            await resume(input.sessionId, session); // a no-op while running; creates the pod of a new agent
+            if (input.type === "session.prompt" && !session.used) {
+              session.used = true;
+              // From the first prompt the agent's sandbox and volume no longer expire; only archiving removes them.
+              await kube.patchSandbox(session.sandbox, usedPatch()).catch(() => undefined);
+            }
+          });
+          session.prep = prepared.catch(() => undefined);
+          await prepared;
           await session.inner.send(input);
         }
       }
@@ -595,7 +757,7 @@ export async function connectKube(
           ps.stopForwarding();
           ps.bridge?.close();
           await ps.inner?.close().catch(() => undefined);
-          if (ps.state !== "suspended") await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used));
+          if (ps.state !== "suspended" && ps.sandbox) await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used));
         }),
       );
       listeners.clear();
@@ -607,16 +769,28 @@ export async function connectKube(
  * Pod paths never leak to Paseo: it only knows the daemon-local checkout. A session may only report
  * capabilities the connection advertised, so the agent's own list is clipped to those.
  */
+/** The agent process's own handle, as last written to the sandbox. */
+function acpHandle(annotations: Record<string, string> | undefined): ProviderPersistence | undefined {
+  try {
+    const raw = annotations?.[ACP_ANNOTATION];
+    return raw ? (JSON.parse(raw) as ProviderPersistence) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function toLocal(
   event: ProviderEvent,
   sessionId: string,
   podCwd: string,
   localCwd: string,
   advertised: readonly string[],
+  handle: ProviderPersistence,
 ): ProviderEvent {
   if (event.type === "session.opened" && event.sessionId === sessionId) {
     return {
       ...event,
+      persistence: handle,
       cwd: event.cwd === podCwd ? localCwd : event.cwd,
       capabilities: event.capabilities.filter((c) => advertised.includes(c)),
     };

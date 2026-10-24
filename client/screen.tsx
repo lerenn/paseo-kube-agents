@@ -216,6 +216,13 @@ function ago(iso: string): string {
   return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} d ago`;
 }
 
+function reaperLine(r: { lastRunAt?: string; removed: number; error?: string; unlabelled: string[] }): string {
+  if (r.error && !r.lastRunAt) return `Orphan cleanup: ${r.error}`;
+  if (!r.lastRunAt) return "Orphan cleanup: not run yet";
+  const unlabelled = r.unlabelled.length ? `; ${r.unlabelled.length} unlabelled left alone` : "";
+  return `Last reconcile: ${r.removed} orphan${r.removed === 1 ? "" : "s"} removed (${ago(r.lastRunAt)})${unlabelled}${r.error ? `; failed: ${r.error}` : ""}`;
+}
+
 /** Warm pool state and the pod agents this plugin runs (running or suspended). Refreshes while visible. */
 function StatusSection({ theme }: { theme: PluginScreenProps["theme"] }) {
   const load = useRpc(kubeStatus);
@@ -255,6 +262,7 @@ function StatusSection({ theme }: { theme: PluginScreenProps["theme"] }) {
       <SettingsCard>
         <View style={{ paddingHorizontal: 14, paddingVertical: 12, gap: 4 }}>
           {line(poolLine)}
+          {status ? line(reaperLine(status.reaper), true) : null}
           {(status?.pods ?? []).map((p) => line(`${p.sandbox}: ${p.state} since ${ago(p.since)}`, true))}
           {status && status.pods.length === 0 ? line("No pod agents running.", true) : null}
           {error ? line(`Status unavailable: ${error}`, true) : null}
@@ -421,6 +429,12 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
                   const n = Number.parseInt(t, 10);
                   if (Number.isFinite(n) && n >= 0) setDraft({ ...draft, podIdleMinutes: n });
                 }}
+              />
+              <SettingsSwitch
+                label="Remove unlabelled leftovers"
+                hint="Also delete this plugin's old sandboxes that match no agent. Turn off if daemons share a namespace."
+                value={draft.sweepUnlabelled}
+                onValueChange={(sweepUnlabelled) => setDraft({ ...draft, sweepUnlabelled })}
               />
               <SettingsSwitch
                 label="Warm pool"
