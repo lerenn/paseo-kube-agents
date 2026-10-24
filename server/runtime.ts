@@ -7,7 +7,7 @@ import type { KubernetesRuntimeConfig } from "./config.js";
 import { type GitRunner, runGit, scrub } from "./git.js";
 import type { Kube, SandboxInfo } from "./kube.js";
 import { INSTALLABLE_CLIS, LAUNCH_SCRIPT } from "./pod-assets.js";
-import { ensureCommand, initSubmodules, installAssets, seedWorkspace, setupMirrors, writeEnvFile } from "./pod-setup.js";
+import { ensureCommand, ensureJq, initSubmodules, installAssets, seedWorkspace, setupMirrors, writeEnvFile } from "./pod-setup.js";
 import { waitPodReady } from "./pod-wait.js";
 import { PodRegistry, type PodState } from "./registry.js";
 import type {
@@ -342,6 +342,7 @@ export class KubernetesRuntime {
         onProblem: (problem) => ctx.notice(problem, "warning"),
       });
       await installAssets(kube, pod);
+      await ensureJq(kube, pod);
       if (!ws.bridge || grows || ws.readyUid !== info.uid) this.startBridge(kube, ws, wanted); // before seeding: submodules are fetched through it
       await this.seedIfEmpty(kube, ws, pod, ctx);
       await this.refreshTargets(kube, ws, pod);
