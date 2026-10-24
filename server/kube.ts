@@ -56,6 +56,12 @@ export interface Kube {
    * another. Needs only `patch` on the Secret. The manifest travels on stdin, never on argv.
    */
   applySecretKey(secret: string, key: string, manifest: string): Promise<void>;
+  /**
+   * Removes one key from a Secret with a merge patch (`{"data":{"<key>":null}}`) sent through
+   * `kubectl proxy`. Needs only `patch`: `kubectl patch` would GET first, and server-side apply does
+   * not remove a key by leaving it out.
+   */
+  removeSecretKey(secret: string, key: string): Promise<void>;
 }
 
 export interface KubectlOptions {
@@ -133,12 +139,14 @@ export function ndjsonStream(
 export class Kubectl implements Kube {
   readonly namespace: string;
   private readonly binary: string;
+  private readonly contextArgs: string[];
   private readonly base: string[];
 
   constructor(options: KubectlOptions) {
     this.namespace = options.namespace;
     this.binary = options.binary ?? "kubectl";
-    this.base = [...(options.context ? ["--context", options.context] : []), "-n", options.namespace];
+    this.contextArgs = options.context ? ["--context", options.context] : [];
+    this.base = [...this.contextArgs, "-n", options.namespace];
   }
 
   protected async ok(args: string[], stdin?: string): Promise<ExecResult> {
@@ -189,6 +197,38 @@ export class Kubectl implements Kube {
       ["apply", "--server-side", `--field-manager=paseo-kube-agents-${key.toLowerCase()}`, "--force-conflicts", "-f", "-"],
       manifest,
     );
+  }
+
+  async removeSecretKey(secret: string, key: string): Promise<void> {
+    const proxy = spawn(this.binary, [...this.contextArgs, "proxy", "--port=0"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const port = await new Promise<number>((resolve, reject) => {
+        let out = "";
+        const timer = setTimeout(() => reject(new Error("kubectl proxy did not start")), 15_000);
+        proxy.stdout.on("data", (d) => {
+          out += d;
+          const m = /127\.0\.0\.1:(\d+)/.exec(out);
+          if (m) {
+            clearTimeout(timer);
+            resolve(Number(m[1]));
+          }
+        });
+        proxy.on("error", reject);
+        proxy.on("close", () => reject(new Error("kubectl proxy exited")));
+      });
+      const res = await fetch(`http://127.0.0.1:${port}/api/v1/namespaces/${this.namespace}/secrets/${secret}`, {
+        method: "PATCH",
+        headers: { "content-type": "application/merge-patch+json" },
+        body: JSON.stringify({ data: { [key]: null } }),
+      });
+      // The response is the whole Secret, values included: only the status is looked at, never the body.
+      void res.body?.cancel().catch(() => undefined);
+      if (!res.ok) throw new Error(`removing ${key} failed: HTTP ${res.status}`);
+    } finally {
+      proxy.kill();
+    }
   }
 
   async delete(kind: string, name: string): Promise<void> {

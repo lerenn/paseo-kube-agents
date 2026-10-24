@@ -11,7 +11,7 @@ import {
 } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useState } from "react";
 import { Linking, Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import { CREDENTIAL_KEYS, type CredentialKey, credentialsSet, credentialsStatus } from "../shared/credentials.js";
+import { CREDENTIAL_KEYS, type CredentialKey, credentialsRemove, credentialsSet, credentialsStatus } from "../shared/credentials.js";
 import { type KubeAgentsConfig, kubeSettings } from "../shared/settings.js";
 
 /** Optional host components; older apps may not provide them, so never render an undefined element. */
@@ -93,6 +93,7 @@ function Credential({
   onSaved(set: Record<string, boolean>): void;
 }) {
   const setCredential = useRpc(credentialsSet);
+  const removeCredential = useRpc(credentialsRemove);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -111,12 +112,34 @@ function Credential({
     }
   }, [setCredential, name, draft]);
 
+  const remove = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onSaved((await removeCredential({ key: name })).set);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }, [removeCredential, name, onSaved]);
+
   const { colors } = theme;
   return (
     <View style={{ paddingHorizontal: 14, paddingVertical: 12, gap: 6 }}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <StatusMark state={isSet} theme={theme} />
         <Text style={{ color: colors.foreground, flex: 1 }}>{CREDENTIAL_LABELS[name]}</Text>
+        {isSet ? (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={`Remove ${CREDENTIAL_LABELS[name]}`}
+            disabled={busy}
+            onPress={() => void remove()}
+          >
+            <Text style={{ color: colors.statusDanger, fontSize: 12 }}>Remove</Text>
+          </Pressable>
+        ) : null}
       </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 8, rowGap: 2, paddingLeft: 24 }}>
         <Text style={{ color: colors.foregroundMuted, fontSize: 12 }}>{CREDENTIAL_HINTS[name].text}</Text>

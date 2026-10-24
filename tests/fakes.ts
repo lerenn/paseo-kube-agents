@@ -52,6 +52,12 @@ export class FakeKube implements Kube {
   }
   namespace = "paseo-agents";
   patches: { key: string; manifest: string }[] = [];
+  removed: string[] = [];
+  removeError?: Error;
+  async removeSecretKey(_secret: string, key: string) {
+    if (this.removeError) throw this.removeError;
+    this.removed.push(key);
+  }
   patchError?: Error;
   async applySecretKey(_secret: string, key: string, manifest: string) {
     if (this.patchError) throw this.patchError;

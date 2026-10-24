@@ -38,6 +38,7 @@ export class LocalPodKube implements Kube {
     this.deleted.push(`${kind}/${name}`);
   }
   async applySecretKey() {}
+  async removeSecretKey() {}
   readonly namespace = "local";
 
   /** Runs a command in the pod; resolves with its output whatever the exit code. */
