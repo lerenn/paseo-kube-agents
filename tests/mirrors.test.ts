@@ -28,9 +28,11 @@ describe("fetch targets", () => {
     const targets = await fetchTargets(runGit, project, "git@github.com:o/r.git", [head]);
     expect(targets.map((t) => [t.origin, t.daemonUrl])).toEqual([
       [true, "git@github.com:o/r.git"],
-      [false, "https://github.com/o/lib.git"],
+      [false, "git@github.com:o/lib.git"], // ssh stays ssh for the daemon
+
     ]);
     expect(targets[0]!.podUrls).toContain("https://github.com/o/r.git");
+    expect(targets[1]!.podUrls).toContain("https://github.com/o/lib.git");
 
     const refused = await applyFetch(runGit, project, { op: "fetch", mirror: "deadbeefdeadbeef", haves: [] }, targets);
     expect(refused.ok).toBe(false);
