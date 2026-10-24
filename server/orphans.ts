@@ -11,22 +11,30 @@ const execFileAsync = promisify(execFile);
 
 export type AgentState = "alive" | "gone" | "unknown";
 
-/** Asks Paseo whether an agent still exists and is not archived. Anything but a clear answer is "unknown". */
-export async function paseoAgentState(agentId: string): Promise<AgentState> {
+type Exec = (file: string, args: string[], options: { timeout: number }) => Promise<{ stdout: string; stderr?: string }>;
+
+function errorCode(text: string | undefined): string | undefined {
   try {
-    const { stdout } = await execFileAsync("paseo", ["agent", "inspect", agentId, "--json"], { timeout: 20_000 });
+    return (JSON.parse(text ?? "") as { error?: { code?: string } }).error?.code;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Asks Paseo whether an agent still exists and is not archived. The CLI prints its JSON error to stderr
+ * and exits non-zero when the agent is not found; anything but a clear answer is "unknown".
+ */
+export async function paseoAgentState(agentId: string, exec: Exec = execFileAsync as unknown as Exec): Promise<AgentState> {
+  try {
+    const { stdout } = await exec("paseo", ["agent", "inspect", agentId, "--json"], { timeout: 20_000 });
     const parsed = JSON.parse(stdout) as { Archived?: boolean; error?: { code?: string } };
     if (parsed.error) return parsed.error.code === "AGENT_NOT_FOUND" ? "gone" : "unknown";
     return parsed.Archived === true ? "gone" : "alive";
   } catch (error) {
-    // a non-zero exit still prints the JSON error on stdout
-    const stdout = (error as { stdout?: string }).stdout;
-    try {
-      const parsed = JSON.parse(stdout ?? "") as { error?: { code?: string } };
-      return parsed.error?.code === "AGENT_NOT_FOUND" ? "gone" : "unknown";
-    } catch {
-      return "unknown";
-    }
+    const failed = error as { stdout?: string; stderr?: string };
+    const code = errorCode(failed.stderr) ?? errorCode(failed.stdout);
+    return code === "AGENT_NOT_FOUND" ? "gone" : "unknown";
   }
 }
 

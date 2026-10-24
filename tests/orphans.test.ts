@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { OrphanReaper, type AgentState } from "../server/orphans.js";
+import { OrphanReaper, paseoAgentState, type AgentState } from "../server/orphans.js";
 import { buildSandbox, claimPatch, resumePatch, suspendPatch, usedPatch } from "../server/sandbox.js";
 import { readDaemonId } from "../server/daemon.js";
 import { connectKube } from "../server/connection.js";
@@ -142,5 +142,32 @@ describe("labels and expiry", () => {
     expect(readDaemonId(home)).toBe("srv_ABC123");
     writeFileSync(join(home, "server-id"), "not a valid label value!!");
     expect(readDaemonId(home)).toBeUndefined();
+  });
+});
+
+describe("asking Paseo about an agent", () => {
+  const ok = (body: object) => async () => ({ stdout: JSON.stringify(body) });
+  const fail = (streams: { stdout?: string; stderr?: string }) => async () => {
+    throw Object.assign(new Error("exit 1"), streams);
+  };
+  const notFound = JSON.stringify({ error: { code: "AGENT_NOT_FOUND", message: "Agent not found: x" } });
+
+  it("alive when found and not archived, gone when archived", async () => {
+    expect(await paseoAgentState("a", ok({ Id: "a", Archived: false }))).toBe("alive");
+    expect(await paseoAgentState("a", ok({ Id: "a", Archived: true }))).toBe("gone");
+  });
+
+  it("gone when Paseo says AGENT_NOT_FOUND, on stderr (what the CLI really does) or stdout", async () => {
+    expect(await paseoAgentState("a", fail({ stderr: notFound }))).toBe("gone");
+    expect(await paseoAgentState("a", fail({ stdout: notFound }))).toBe("gone");
+    expect(await paseoAgentState("a", ok(JSON.parse(notFound)))).toBe("gone");
+  });
+
+  it("unknown, never gone, for anything else: daemon unreachable, a crash, garbage, a missing binary", async () => {
+    const unreachable = JSON.stringify({ error: { code: "DAEMON_UNREACHABLE" } });
+    expect(await paseoAgentState("a", fail({ stderr: unreachable }))).toBe("unknown");
+    expect(await paseoAgentState("a", fail({ stderr: "boom" }))).toBe("unknown");
+    expect(await paseoAgentState("a", async () => ({ stdout: "not json" }))).toBe("unknown");
+    expect(await paseoAgentState("a", async () => { throw new Error("spawn paseo ENOENT"); })).toBe("unknown");
   });
 });
