@@ -546,8 +546,8 @@ export class KubernetesRuntime {
         // An exec that ends because the pod went away is the runtime's doing, not the process finishing.
         const info = await kube.podInfo(pod).catch(() => null);
         const lost = ws.phase === "suspended" || !info || !info.ready || info.terminating;
-        if (code !== 0 && !lost) {
-          this.log(`[kubernetes-runtime] ${request.argv[0]} in ${pod} exited with ${code ?? signal}${stderrTail.trim() ? `: ${scrub(stderrTail.trim())}` : ""}`);
+        if (code !== 0) {
+          this.log(`[kubernetes-runtime] ${request.argv[0]} in ${pod} exited with ${code ?? signal}${lost ? " (pod lost or suspended)" : ""}${stderrTail.trim() ? `: ${scrub(stderrTail.trim())}` : ""}`);
         }
         if (lost && code !== 0) {
           return { code, signal, reason: "runtime-lost" as const, message: "The pod was suspended or lost; the next message brings it back" };
