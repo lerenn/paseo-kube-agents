@@ -30,7 +30,7 @@ async function setup(settings: object = {}, deps: object = {}) {
       kube,
       acpProvider: acp.provider,
       detectRepo: repo,
-      seeder: fakeSeeder,
+      seeder: fakeSeeder, eager: true,
       registry,
       sleep: async () => undefined,
       now: () => clock++, // every read moves the clock a little, so a pod that never becomes ready times out
@@ -63,24 +63,25 @@ describe("idle suspension", () => {
     await t.tick();
     const suspend = t.kube.patches2.at(-1)!.patch;
     expect(suspend.spec.operatingMode).toBe("Suspended");
-    expect(Date.parse(suspend.spec.shutdownTime) - Date.now()).toBeGreaterThan(7 * 24 * 3600 * 1000); // the volume outlives the usual 8h
+    expect(suspend.spec.shutdownTime).toBeNull(); // an agent in use never expires: its volume goes only on archive
     expect(t.kube.calls.filter((c) => c.startsWith("delete:"))).toEqual([]);
     expect(t.registry.list()[0]!.state).toBe("suspended");
     expect(t.notices().at(-1)).toMatch(/Pod suspended/);
     expect(t.acp.closed).toBe(true);
   });
 
-  it("keeps an unused draft's volume only an hour when it sits idle, and a prompt resets the lifetime", async () => {
+  it("keeps an unused draft's volume only an hour when it sits idle; a prompt removes every expiry", async () => {
     const draft = await setup();
     draft.advance(31 * MIN);
     await draft.tick();
     const suspend = draft.kube.patches2.at(-1)!.patch;
     expect(Date.parse(suspend.spec.shutdownTime) - Date.now()).toBeLessThan(2 * 3600 * 1000);
     await draft.conn.send(promptInput("s1"));
-    expect(Date.parse(draft.kube.patches2.at(-1)!.patch.spec.shutdownTime) - Date.now()).toBeGreaterThan(7 * 3600 * 1000); // the normal 8h again
+    expect(draft.kube.patches2.filter((p) => p.patch.spec?.operatingMode === "Running").at(-1)!.patch.spec.shutdownTime).not.toBeNull(); // still a draft while it wakes
+    expect(draft.kube.patches2.at(-1)!.patch).toEqual({ spec: { shutdownTime: null } }); // then the first prompt removes every expiry
     draft.advance(31 * MIN);
     await draft.tick();
-    expect(Date.parse(draft.kube.patches2.at(-1)!.patch.spec.shutdownTime) - Date.now()).toBeGreaterThan(7 * 24 * 3600 * 1000); // now an agent in use
+    expect(draft.kube.patches2.at(-1)!.patch.spec.shutdownTime).toBeNull();
   });
 
   it("does not suspend an agent that is working or waiting on a permission, or when disabled", async () => {
@@ -114,7 +115,7 @@ describe("idle suspension", () => {
     const clonesBefore = t.kube.execs.filter((e) => e.argv[2]?.includes("git init")).length;
     t.acp.inputs.length = 0;
     await t.conn.send(promptInput("s1", "wake up"));
-    const resume = t.kube.patches2.at(-1)!.patch;
+    const resume = t.kube.patches2.filter((p) => p.patch.spec?.operatingMode === "Running").at(-1)!.patch;
     expect(resume.spec.operatingMode).toBe("Running");
     expect(resume.spec.podTemplate.spec.containers[0].image).toBe("node:23"); // current settings, not the old image
     expect(t.kube.execs.filter((e) => e.argv[2]?.includes("git init")).length).toBe(clonesBefore); // the volume still has the workspace
@@ -174,7 +175,7 @@ describe("finding an agent's sandbox again", () => {
     const kube = new FakeKube();
     kube.sandboxes = [{ name: "pka-x-1", labels: { "paseo.sh/session": sessionLabel("s1") }, annotations: {}, operatingMode: "Suspended" }];
     const acp = new FakeAcp();
-    const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: () => 1 });
+    const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, eager: true, sleep: async () => undefined, now: () => 1 });
     kube.hasClone = true; // the volume has the workspace
     const persistence = { version: 1, data: { sessionId: "native-s1" } };
     await conn.send({ type: "session.open", requestId: "r", sessionId: "s1", config: cfg(), history: "skip", persistence });
@@ -190,7 +191,7 @@ describe("finding an agent's sandbox again", () => {
     const kube = new FakeKube();
     kube.sandboxes = [{ name: "pka-x-1", labels: { "paseo.sh/session": sessionLabel("s1") }, annotations: {}, operatingMode: "Running" }];
     kube.waitError = new Error("api down");
-    const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({ readyTimeoutSeconds: 1 }), kube, acpProvider: new FakeAcp().provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: (() => { let t = 0; return () => (t += 1000); })() });
+    const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({ readyTimeoutSeconds: 1 }), kube, acpProvider: new FakeAcp().provider, detectRepo: repo, seeder: fakeSeeder, eager: true, sleep: async () => undefined, now: (() => { let t = 0; return () => (t += 1000); })() });
     const events: ProviderEvent[] = [];
     conn.onEvent((e) => events.push(e));
     await conn.send({ type: "session.open", requestId: "r", sessionId: "s1", config: cfg(), history: "skip" });
@@ -205,7 +206,7 @@ describe("finding an agent by its own session handle", () => {
     kube.sandboxes = [{ name: "pka-x-1", labels: { "paseo.sh/native": sessionLabel("native-old") }, annotations: {}, operatingMode: "Suspended" }];
     kube.hasClone = true;
     const acp = new FakeAcp();
-    const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, now: () => 1 });
+    const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, eager: true, sleep: async () => undefined, now: () => 1 });
     await conn.send({ type: "session.open", requestId: "r", sessionId: "brand-new-id", config: cfg(), history: "skip", persistence: { version: 1, data: { sessionId: "native-old" } } });
     expect(kube.applied).toHaveLength(0);
     expect(kube.patches2[0]!.patch.spec.operatingMode).toBe("Running");
@@ -229,7 +230,7 @@ describe("claiming a warm pod for a new agent", () => {
       kube,
       acpProvider: new FakeAcp().provider,
       detectRepo: repo,
-      seeder: fakeSeeder,
+      seeder: fakeSeeder, eager: true,
       sleep: async () => undefined,
       pool: { noteRequest: () => void requests++, claim: async (id) => (claims.push(id), "pka-warm-7") },
     });
@@ -243,7 +244,7 @@ describe("claiming a warm pod for a new agent", () => {
   it("creates a cold sandbox when no warm pod is ready, and survives a pool error", async () => {
     for (const claim of [async () => null, async () => { throw new Error("boom"); }]) {
       const kube = new FakeKube();
-      const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({}), kube, acpProvider: new FakeAcp().provider, detectRepo: repo, seeder: fakeSeeder, sleep: async () => undefined, pool: { noteRequest: () => undefined, claim } });
+      const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({}), kube, acpProvider: new FakeAcp().provider, detectRepo: repo, seeder: fakeSeeder, eager: true, sleep: async () => undefined, pool: { noteRequest: () => undefined, claim } });
       await conn.send({ type: "session.open", requestId: "r", sessionId: "s1", config: cfg(), history: "skip" });
       expect(kube.applied).toHaveLength(1);
     }

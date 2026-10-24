@@ -107,7 +107,7 @@ describe("pod loss recovery", () => {
     let t = 0;
     const conn = await connectKube(
       { versions: [1], capabilities: ["prompt.message"] },
-      { config: ConfigSchema.parse(storage ? { storage } : {}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, catalog: async () => ({ models: [], modes: [] }), sleep: async () => undefined, now: () => (t += 1000) },
+      { config: ConfigSchema.parse(storage ? { storage } : {}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, eager: true, catalog: async () => ({ models: [], modes: [] }), sleep: async () => undefined, now: () => (t += 1000) },
     );
     conn.onEvent((e) => events.push(e));
     await conn.send({ type: "session.open", requestId: "r1", sessionId: "s1", config: cfg(), history: "skip" });
@@ -143,7 +143,7 @@ describe("pod loss recovery", () => {
     let t = 0;
     const conn = await connectKube(
       { versions: [1], capabilities: ["prompt.message", "permission.tool_policy"] },
-      { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, catalog: async () => ({ models: [], modes: [] }), sleep: async () => undefined, now: () => (t += 1000) },
+      { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, eager: true, catalog: async () => ({ models: [], modes: [] }), sleep: async () => undefined, now: () => (t += 1000) },
     );
     await conn.send({
       type: "session.open", requestId: "r", sessionId: "s1",

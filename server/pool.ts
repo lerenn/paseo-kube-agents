@@ -27,6 +27,8 @@ export interface PoolDeps {
   kubeFor(config: KubeAgentsConfig): Kube;
   now?: () => number;
   statePath?: string;
+  /** This daemon's id, written on warm sandboxes and their volume claims. */
+  daemonId?: string;
   /** Name for a new warm sandbox (injected for tests). */
   newName?: () => string;
 }
@@ -81,7 +83,7 @@ export class WarmPool {
   }
 
   /** Reserves a ready warm pod for `sessionId`, or returns null (disabled, asleep, none ready or all stale). */
-  async claim(sessionId: string): Promise<string | null> {
+  async claim(sessionId: string, agentId?: string): Promise<string | null> {
     const config = await this.deps.getConfig();
     if (!config.warmPool.enabled || this.state.asleepSince) return null;
     const kube = this.deps.kubeFor(config);
@@ -90,7 +92,7 @@ export class WarmPool {
     for (const sandbox of warm) {
       const pod = await kube.podInfo(sandbox.name).catch(() => null);
       if (!pod?.ready || pod.terminating) continue;
-      await kube.patchSandbox(sandbox.name, claimPatch(sessionId, config));
+      await kube.patchSandbox(sandbox.name, claimPatch(sessionId, config, agentId));
       void this.kick();
       return sandbox.name;
     }
@@ -146,7 +148,7 @@ export class WarmPool {
     for (const sandbox of [...stale, ...surplus]) await this.deleteSandbox(kube, sandbox.name);
     for (let i = fresh.length; i < wanted; i++) {
       const name = (this.deps.newName ?? (() => `pka-warm-${randomBytes(3).toString("hex")}`))();
-      await kube.apply(buildSandbox({ name, sessionId: "", config, pool: true }));
+      await kube.apply(buildSandbox({ name, sessionId: "", config, pool: true, daemonId: this.deps.daemonId }));
     }
   }
 

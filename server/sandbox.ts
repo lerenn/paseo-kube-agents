@@ -21,6 +21,9 @@ export function sandboxName(sessionId: string, repo?: string, slug?: string): st
 
 export const SESSION_LABEL = "paseo.sh/session";
 export const POOL_LABEL = "paseo.sh/pool";
+/** The daemon that owns a sandbox (and its volume) and the Paseo agent it belongs to: what the orphan reaper goes by. */
+export const DAEMON_LABEL = "paseo.sh/daemon";
+export const AGENT_LABEL = "paseo.sh/agent";
 /** The agent's own session handle (stable across Paseo reopening the session under a new id). */
 export const NATIVE_LABEL = "paseo.sh/native";
 
@@ -31,11 +34,10 @@ export function nativeSessionId(persistence: { data?: unknown } | undefined): st
     : undefined;
 }
 export const SPEC_HASH_ANNOTATION = "paseo.sh/spec-hash";
-/** A suspended agent's volume is kept this long, so it can be resumed days later. */
-export const SUSPENDED_RETENTION_HOURS = 14 * 24;
 /**
  * An agent that was never prompted (a draft the composer opened to preview features, say) is only kept an
- * hour: abandoned drafts must not hold a volume for two weeks. A prompt on it resets the lifetime.
+ * hour once suspended: abandoned drafts must not hold a volume. An agent in use has no expiry at all: its
+ * storage goes only when it is archived (or the orphan reaper finds its agent gone).
  */
 export const UNUSED_RETENTION_HOURS = 1;
 
@@ -62,15 +64,24 @@ export interface SandboxSpecInput {
   config: KubeAgentsConfig;
   /** Build a warm pool sandbox: not tied to a session yet. */
   pool?: boolean;
+  /** The owning daemon and Paseo agent, for the orphan reaper. */
+  daemonId?: string;
+  agentId?: string;
 }
 
 /** A `Sandbox` (agents.x-k8s.io) whose single container idles; the agent is started by `kubectl exec`. */
 export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
-  const { name, sessionId, config, pool } = input;
+  const { name, sessionId, config, pool, daemonId, agentId } = input;
   const labels = {
     [MANAGED_BY_LABEL]: MANAGED_BY,
   };
-  const sandboxLabels = pool ? { ...labels, [POOL_LABEL]: "warm" } : { ...labels, [SESSION_LABEL]: sessionLabel(sessionId) };
+  const owner = {
+    ...(daemonId ? { [DAEMON_LABEL]: daemonId } : {}),
+    ...(agentId ? { [AGENT_LABEL]: agentId } : {}),
+  };
+  const sandboxLabels = pool
+    ? { ...labels, ...owner, [POOL_LABEL]: "warm" }
+    : { ...labels, ...owner, [SESSION_LABEL]: sessionLabel(sessionId) };
   return {
     apiVersion: config.sandboxApiVersion,
     kind: "Sandbox",
@@ -84,7 +95,7 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
       shutdownTime: new Date(Date.now() + config.maxLifetimeSeconds * 1000).toISOString(),
       shutdownPolicy: "Delete",
       service: false,
-      ...volumeClaims(config),
+      ...volumeClaims(config, owner),
       podTemplate: {
         metadata: { labels },
         spec: {
@@ -111,13 +122,13 @@ function placement(config: KubeAgentsConfig) {
 }
 
 /** A plain ReadWriteOnce claim: no provider-specific fields, so it works on any cluster. */
-function volumeClaims(config: KubeAgentsConfig) {
+function volumeClaims(config: KubeAgentsConfig, labels: Record<string, string> = {}) {
   if (config.storage.mode !== "persistent") return {};
   const { size, storageClassName } = config.storage;
   return {
     volumeClaimTemplates: [
       {
-        metadata: { name: WORKSPACE_VOLUME },
+        metadata: { name: WORKSPACE_VOLUME, ...(Object.keys(labels).length ? { labels } : {}) },
         spec: {
           accessModes: ["ReadWriteOnce"],
           resources: { requests: { storage: size } },
@@ -151,28 +162,33 @@ export function agentContainer(config: KubeAgentsConfig) {
 
 const hours = (n: number) => new Date(Date.now() + n * 3600 * 1000).toISOString();
 
-/** Deletes the pod and keeps the volume; the Sandbox outlives its normal shutdown time so the agent can resume later. */
+/** Deletes the pod and keeps the volume. An agent in use never expires; a draft is kept an hour. */
 export function suspendPatch(used = true) {
-  return { spec: { operatingMode: "Suspended", shutdownTime: hours(used ? SUSPENDED_RETENTION_HOURS : UNUSED_RETENTION_HOURS) } };
+  return { spec: { operatingMode: "Suspended", shutdownTime: used ? null : hours(UNUSED_RETENTION_HOURS) } };
 }
 
-/** Recreates the pod on the same volume, with the current image and settings and a fresh lifetime. */
-export function resumePatch(config: KubeAgentsConfig) {
+/** Recreates the pod on the same volume, with the current image and settings. A draft gets a fresh lifetime. */
+export function resumePatch(config: KubeAgentsConfig, used = true) {
   return {
     metadata: { annotations: { [SPEC_HASH_ANNOTATION]: specHash(config) } },
     spec: {
       operatingMode: "Running",
-      shutdownTime: new Date(Date.now() + config.maxLifetimeSeconds * 1000).toISOString(),
+      shutdownTime: used ? null : new Date(Date.now() + config.maxLifetimeSeconds * 1000).toISOString(),
       podTemplate: { spec: { containers: [agentContainer(config)] } },
     },
   };
 }
 
+/** The agent was prompted: from now on its sandbox and volume have no expiry. */
+export function usedPatch() {
+  return { spec: { shutdownTime: null } };
+}
+
 /** Ties a warm sandbox to the agent that claimed it, and gives it a fresh lifetime. */
-export function claimPatch(sessionId: string, config: KubeAgentsConfig) {
+export function claimPatch(sessionId: string, config: KubeAgentsConfig, agentId?: string) {
   return {
     metadata: {
-      labels: { [POOL_LABEL]: "claimed", [SESSION_LABEL]: sessionLabel(sessionId) },
+      labels: { [POOL_LABEL]: "claimed", [SESSION_LABEL]: sessionLabel(sessionId), ...(agentId ? { [AGENT_LABEL]: agentId } : {}) },
       annotations: { "paseo.sh/session-id": sessionId },
     },
     spec: { shutdownTime: new Date(Date.now() + config.maxLifetimeSeconds * 1000).toISOString() },

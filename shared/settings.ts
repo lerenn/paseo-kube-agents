@@ -49,6 +49,11 @@ export const ConfigSchema = z.object({
   tolerationKeys: z.array(z.string()).default([]),
   storage: StorageSchema.default({ mode: "persistent", size: "10Gi" }),
   warmPool: WarmPoolSchema.default({ enabled: false, size: 1, idleMinutes: 60 }),
+  /**
+   * Also delete this plugin's sandboxes that carry no daemon label (made before labelling existed) and match no
+   * agent of this daemon, after 15 minutes. Turn off where several daemons share one namespace.
+   */
+  sweepUnlabelled: z.boolean().default(true),
   /** An agent idle this long has its pod deleted (the volume stays); any input brings it back. 0 = never. */
   podIdleMinutes: z.number().int().min(0).default(30),
 });

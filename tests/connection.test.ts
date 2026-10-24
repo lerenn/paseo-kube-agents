@@ -22,7 +22,7 @@ function setup(overrides: Partial<ReturnType<typeof ConfigSchema.parse>> = {}) {
   const acp = new FakeAcp();
   const config = ConfigSchema.parse({ image: "go:1", ...overrides });
   const events: ProviderEvent[] = [];
-  const conn = connectKube(request, { config, kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, catalog: async () => FALLBACK_CATALOG, sleep: async () => undefined, now: fakeClock() });
+  const conn = connectKube(request, { config, kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, eager: true, catalog: async () => FALLBACK_CATALOG, sleep: async () => undefined, now: fakeClock() });
   return { kube, acp, events, conn };
 }
 
@@ -76,7 +76,7 @@ describe("kube connection", () => {
     expect(opened.capabilities).toEqual([]); // setup() offers neither prompt.image nor session.persistence
     const full = await connectKube(
       { versions: [1], capabilities: ["prompt.image", "session.persistence"] },
-      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider, detectRepo: repo, seeder: fakeSeeder, catalog: async () => FALLBACK_CATALOG },
+      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider, detectRepo: repo, seeder: fakeSeeder, eager: true, catalog: async () => FALLBACK_CATALOG },
     );
     const seen: ProviderEvent[] = [];
     full.onEvent((e) => seen.push(e));
@@ -147,7 +147,7 @@ describe("kube connection", () => {
     expect(kube.calls.filter((c) => c.startsWith("delete:"))).toHaveLength(0);
     const suspends = kube.patches2.filter((x) => x.patch.spec?.operatingMode === "Suspended");
     expect(suspends).toHaveLength(2);
-    expect(Date.parse(suspends[0]!.patch.spec.shutdownTime) - Date.now()).toBeGreaterThan(7 * 24 * 3600 * 1000);
+    expect(suspends[0]!.patch.spec.shutdownTime).toBeNull(); // no expiry for an agent in use
   });
 
   it("deletes sessions that were only opened, never prompted (drafts), when the connection closes", async () => {
@@ -236,7 +236,7 @@ describe("kube connection edge cases", () => {
       };
       return reg;
     };
-    const conn = await connectKube(request, { config: ConfigSchema.parse({}), kube, acpProvider: failing, detectRepo: repo, seeder: fakeSeeder, catalog: async () => FALLBACK_CATALOG, sleep: async () => undefined, now: fakeClock() });
+    const conn = await connectKube(request, { config: ConfigSchema.parse({}), kube, acpProvider: failing, detectRepo: repo, seeder: fakeSeeder, eager: true, catalog: async () => FALLBACK_CATALOG, sleep: async () => undefined, now: fakeClock() });
     conn.onEvent((e) => events.push(e));
     await open(conn, "s");
     expect(events.at(-1)).toMatchObject({ type: "request.failed", error: { message: expect.stringContaining("agent crashed") } });
@@ -270,7 +270,7 @@ describe("kube connection edge cases", () => {
     expect(conn.capabilities).not.toContain("permission.tool_policy"); // request did not offer it
     const offered = await connectKube(
       { versions: [1], capabilities: ["permission", "permission.tool_policy"] },
-      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, catalog: async () => FALLBACK_CATALOG },
+      { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, eager: true, catalog: async () => FALLBACK_CATALOG },
     );
     expect(offered.capabilities).toContain("permission.tool_policy");
     await offered.send({

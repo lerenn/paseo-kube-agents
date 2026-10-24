@@ -53,7 +53,7 @@ describe("provider catalog", () => {
 
   it("is what the connection answers a catalog request with", async () => {
     const events: ProviderEvent[] = [];
-    const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider, seeder: fakeSeeder, catalog: async () => catalogFromModels(cli) });
+    const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider, seeder: fakeSeeder, eager: true, catalog: async () => catalogFromModels(cli) });
     conn.onEvent((e) => events.push(e));
     await conn.send({ type: "catalog", requestId: "k" });
     expect((events[0] as any).catalog.models.map((m: any) => m.id)).toEqual(["claude-opus-5-5", "claude-sonnet-5-5"]);

@@ -5,7 +5,7 @@ import type {
   ProviderInput,
   ProviderRegistration,
 } from "@getpaseo/plugin/server/provider";
-import type { ExecResult, Kube, PodInfo, SandboxInfo } from "../server/kube.js";
+import type { ClaimInfo, ExecResult, Kube, PodInfo, SandboxInfo } from "../server/kube.js";
 
 export class FakeKube implements Kube {
   calls: string[] = [];
@@ -73,6 +73,12 @@ export class FakeKube implements Kube {
     const meta = (patch as any).metadata;
     if (sb && meta?.labels) sb.labels = { ...sb.labels, ...meta.labels };
     if (sb && meta?.annotations) sb.annotations = { ...sb.annotations, ...meta.annotations };
+  }
+  claims: ClaimInfo[] = [];
+  async listClaims(selector?: string) {
+    if (!selector) return this.claims;
+    const [k, v] = selector.split("=");
+    return this.claims.filter((c) => (v === undefined ? k! in c.labels : c.labels[k!] === v));
   }
   async listSandboxes(selector: string) {
     const [k, v] = selector.split("=");
