@@ -161,12 +161,13 @@ describe("fetching through the daemon (real git, real pod scripts)", () => {
     expect(sh(podDir, "tag", "--list", "v9")).toBe("v9");
     expect((await kube.as(["git", "config", "--global", "--get-regexp", "insteadof"])).stdout).toContain("mirrors/");
 
+    expect(sh(podDir, "config", "branch.main.merge")).toBe("refs/heads/main"); // a plain `git pull` knows where from
     // a second upstream commit arrives through pull, sending only what the pod lacks
     writeFileSync(join(other, "more.txt"), "more\n");
     sh(other, "add", ".");
     sh(other, "commit", "-qm", "more upstream work");
     sh(other, "push", "-q", "origin", "main");
-    const pulled = await kube.as(["git", "pull", "--ff-only", "origin", "main"], { cwd: podDir });
+    const pulled = await kube.as(["git", "pull", "--ff-only"], { cwd: podDir });
     expect(pulled.code, pulled.stderr).toBe(0);
     expect(sh(podDir, "log", "-1", "--format=%s")).toBe("more upstream work");
   });
