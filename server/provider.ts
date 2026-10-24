@@ -3,7 +3,8 @@ import { promisify } from "node:util";
 import { runAcpProvider } from "@getpaseo/plugin/server/acp";
 import type { ProviderRegistration } from "@getpaseo/plugin/server/provider";
 import type { KubeAgentsConfig } from "./config.js";
-import { connectKube } from "./connection.js";
+import { type ConnectionDeps, connectKube } from "./connection.js";
+import type { PodRegistry } from "./registry.js";
 import { Kubectl } from "./kube.js";
 
 const execFileAsync = promisify(execFile);
@@ -12,7 +13,10 @@ const execFileAsync = promisify(execFile);
  * Registering this provider does nothing on its own: no cluster call is made until an agent is
  * created with provider "kube-agents". `getConfig` is read at connect time so UI changes apply.
  */
-export function createProvider(getConfig: () => Promise<KubeAgentsConfig>): ProviderRegistration {
+export function createProvider(
+  getConfig: () => Promise<KubeAgentsConfig>,
+  runtime: { pool?: ConnectionDeps["pool"]; registry?: PodRegistry } = {},
+): ProviderRegistration {
   return {
     id: "kube-agents",
     label: "Kube Agents",
@@ -31,6 +35,8 @@ export function createProvider(getConfig: () => Promise<KubeAgentsConfig>): Prov
       return connectKube(request, {
         config,
         kube,
+        pool: runtime.pool,
+        registry: runtime.registry,
         acpProvider: (connector) =>
           runAcpProvider({
             id: "kube-agents",

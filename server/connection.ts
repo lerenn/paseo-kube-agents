@@ -12,7 +12,8 @@ import type { Readable } from "node:stream";
 import type { AcpConnector } from "@getpaseo/plugin/server/acp";
 import type { KubeAgentsConfig } from "./config.js";
 import type { Kube } from "./kube.js";
-import { buildSandbox, sandboxName, workspaceClaimName } from "./sandbox.js";
+import { PodRegistry, type PodState } from "./registry.js";
+import { NATIVE_LABEL, SESSION_LABEL, buildSandbox, nativeSessionId, resumePatch, sandboxName, sessionLabel, suspendPatch, workspaceClaimName } from "./sandbox.js";
 import { REF_ENV_KEYS } from "../shared/pod-ref.js";
 import { createCatalogSource } from "./catalog.js";
 import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
@@ -40,6 +41,9 @@ const SUPPORTED_CAPABILITIES = [
   "permission",
   "permission.tool_policy",
   "prompt.image",
+  // Paseo reopens a closed agent (after a plugin restart, or once suspended) from its saved handle; without
+  // this capability it refuses to resume the session at all.
+  "session.persistence",
 ];
 
 export interface ConnectionDeps {
@@ -57,6 +61,12 @@ export interface ConnectionDeps {
   git?: GitRunner;
   /** Builds the seed bundle from the daemon's checkout (injected for tests). */
   seeder?: (cwd: string, plan: ClonePlan | null, currentBranch: string) => Promise<SeedBundle>;
+  /** Pre-started pods for new agents (see WarmPool); absent when pooling is not wired. */
+  pool?: { noteRequest(): void; claim(sessionId: string): Promise<string | null> };
+  /** Where session states are published for the Kube Agents screen. */
+  registry?: PodRegistry;
+  /** Calls `fn` every `ms` until the returned stop function runs (injected for tests). */
+  ticker?: (fn: () => void, ms: number) => () => void;
   /** Clock and sleep for pod polling (injected for tests). */
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
@@ -84,7 +94,19 @@ interface PodSession {
   stopForwarding: () => void;
   /** The agent's own session handle, so a replacement pod can resume the conversation. */
   persistence?: ProviderPersistence;
+  /** The native session id already written to the sandbox label. */
+  nativeLabelled?: string;
   turnId?: string;
+  /** Running, suspended (pod deleted, volume kept) or coming back. */
+  state: PodState;
+  /** True once the agent has been prompted (or has run a turn); drafts that were only opened have not. */
+  used: boolean;
+  /** Last turn end, input or open; the idle timer counts from here. */
+  lastActivity: number;
+  /** Permission prompts shown to Paseo and not yet answered: the agent is waiting on a person, not idle. */
+  pendingPermissions: number;
+  /** The resume in flight, shared so inputs that arrive meanwhile queue behind it. */
+  resuming?: Promise<void>;
   /** False until Paseo's open request has completed; failures before that are not recoverable. */
   opened: boolean;
   recovering: boolean;
@@ -133,6 +155,12 @@ export async function connectKube(
   const sessions = new Map<string, PodSession>();
   const opening = new Map<string, Promise<void>>();
   let closed = false;
+
+  const now = () => (deps.now ?? Date.now)();
+  const track = (sessionId: string, ps: PodSession, state: PodState) => {
+    ps.state = state;
+    deps.registry?.set(sessionId, ps.sandbox, state, now());
+  };
 
   const emit = (event: ProviderEvent) => {
     for (const listener of listeners) listener(event);
@@ -208,12 +236,27 @@ export async function connectKube(
     return inner;
   }
 
+  /** Keeps the agent's handle, and labels the sandbox with it so a reopened session (new Paseo id) finds it. */
+  function remember(ps: PodSession, persistence: ProviderPersistence): void {
+    ps.persistence = persistence;
+    const native = nativeSessionId(persistence);
+    if (!native || ps.nativeLabelled === native) return;
+    ps.nativeLabelled = native;
+    void kube.patchSandbox(ps.sandbox, { metadata: { labels: { [NATIVE_LABEL]: sessionLabel(native) } } }).catch(() => undefined);
+  }
+
   function onInnerEvent(sessionId: string, ps: PodSession, inner: ProviderConnection, event: ProviderEvent) {
     if (inner !== ps.inner) return;
-    if (event.type === "session.opened" && event.persistence) ps.persistence = event.persistence;
-    if (event.type === "session.persistence" && event.sessionId === sessionId) ps.persistence = event.persistence;
+    if (event.type === "session.opened" && event.persistence) remember(ps, event.persistence);
+    if (event.type === "session.persistence" && event.sessionId === sessionId) remember(ps, event.persistence);
     if (event.type === "session.turn" && event.sessionId === sessionId) {
       ps.turnId = event.state === "started" ? event.turnId : undefined;
+      ps.lastActivity = now();
+      ps.used = true;
+    }
+    if (event.type === "session.permission_resolved" && event.sessionId === sessionId) {
+      ps.pendingPermissions = Math.max(0, ps.pendingPermissions - 1);
+      ps.lastActivity = now();
     }
     if (event.type === "session.config" && event.sessionId === sessionId) {
       const settings = event.config.settings.filter((setting) => !DUPLICATED_SETTING_IDS.has(setting.id));
@@ -245,8 +288,100 @@ export async function connectKube(
         return;
       }
     }
+    if (event.type === "session.permission" && event.sessionId === sessionId) ps.pendingPermissions++;
     emit(toLocal(event, sessionId, ps.podCwd, ps.localCwd, capabilities));
   }
+
+  /** Waits for the pod, makes sure the workspace is there, and reopens the agent's session in it. */
+  async function reopenOnPod(sessionId: string, ps: PodSession): Promise<void> {
+    await wait(ps.sandbox, (problem) => notice(sessionId, "warning", problem));
+    const repo = await (deps.detectRepo ?? detectRepo)(ps.localCwd);
+    await ensureWorkspace(ps, repo, parseClonePlan(ps.config.env));
+    startPodBridge(ps);
+    const inner = await startInner(sessionId, ps);
+    ps.reopening = true;
+    try {
+      await inner.send({
+        type: "session.open",
+        requestId: `recover-${Date.now()}`,
+        sessionId,
+        config: ps.config,
+        history: "skip",
+        ...(ps.persistence ? { persistence: ps.persistence } : {}),
+      } as ProviderInput);
+    } finally {
+      ps.reopening = false;
+    }
+  }
+
+  const persistent = config.storage.mode === "persistent";
+
+  /** Deletes the pod of an idle agent and keeps its volume; the next input brings it back. */
+  async function suspend(sessionId: string, ps: PodSession): Promise<void> {
+    if (ps.state !== "running" || ps.recovering || ps.closing) return;
+    track(sessionId, ps, "suspended");
+    ps.stopForwarding();
+    ps.bridge?.close();
+    await ps.inner.close().catch(() => undefined);
+    try {
+      await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used));
+      notice(sessionId, "info", "Pod suspended after sitting idle. It comes back when you send a message; the workspace is kept.");
+    } catch (error) {
+      // Could not suspend: the agent process is gone, so bring it back rather than leave a half state.
+      notice(sessionId, "warning", `Could not suspend the pod: ${(error as Error).message}`);
+      await resume(sessionId, ps).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Recreates the pod on the same volume (current image and settings) and resumes the agent's session
+   * from its saved handle. One resume at a time per agent: inputs that arrive meanwhile wait for it.
+   */
+  function resume(sessionId: string, ps: PodSession): Promise<void> {
+    if (ps.state === "running") return Promise.resolve();
+    ps.resuming ??= (async () => {
+      track(sessionId, ps, "resuming");
+      notice(sessionId, "info", "Resuming the pod...");
+      try {
+        await kube.patchSandbox(ps.sandbox, resumePatch(config));
+        await reopenOnPod(sessionId, ps);
+        ps.lastActivity = now();
+        track(sessionId, ps, "running");
+        notice(sessionId, "info", "Pod resumed");
+      } catch (error) {
+        // Back to suspended (and the pod released) so the next input retries from a clean state.
+        ps.bridge?.close();
+        await ps.inner?.close().catch(() => undefined);
+        await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used)).catch(() => undefined);
+        track(sessionId, ps, "suspended");
+        const message = (error as Error).message;
+        notice(sessionId, "error", `Could not resume the pod: ${message}`);
+        throw new Error(`kube-agents: could not resume the pod: ${message}. Send a message again to retry.`);
+      } finally {
+        ps.resuming = undefined;
+      }
+    })();
+    return ps.resuming;
+  }
+
+  /** Suspends every agent that has been idle for `podIdleMinutes`. */
+  async function checkIdle(): Promise<void> {
+    const limit = config.podIdleMinutes * 60_000;
+    if (!persistent || limit <= 0) return;
+    for (const [sessionId, ps] of sessions) {
+      const idle = !ps.turnId && ps.pendingPermissions === 0 && ps.opened && now() - ps.lastActivity >= limit;
+      if (ps.state === "running" && idle) {
+        console.log(`[kube-agents] suspending idle pod ${ps.sandbox} (idle ${Math.round((now() - ps.lastActivity) / 1000)}s)`);
+        await suspend(sessionId, ps);
+      }
+    }
+  }
+  if (persistent && config.podIdleMinutes > 0) console.log(`[kube-agents] idle suspension on: pods idle ${config.podIdleMinutes} min are suspended`);
+  const stopTicker = (deps.ticker ?? ((fn, ms) => {
+    const timer = setInterval(fn, ms) as unknown as NodeJS.Timeout;
+    timer.unref?.();
+    return () => clearInterval(timer);
+  }))(() => void checkIdle().catch(() => undefined), 30_000);
 
   async function recover(sessionId: string, ps: PodSession): Promise<void> {
     if (ps.recovering || ps.closing || closed) return;
@@ -278,20 +413,7 @@ export async function connectKube(
     notice(sessionId, "warning", "Pod lost, waiting for a replacement");
     try {
       await lost.close().catch(() => undefined);
-      await wait(ps.sandbox, (problem) => notice(sessionId, "warning", problem));
-      const repo = await (deps.detectRepo ?? detectRepo)(ps.localCwd);
-      await ensureWorkspace(ps, repo, parseClonePlan(ps.config.env));
-      startPodBridge(ps);
-      const inner = await startInner(sessionId, ps);
-      ps.reopening = true;
-      await inner.send({
-        type: "session.open",
-        requestId: `recover-${Date.now()}`,
-        sessionId,
-        config: ps.config,
-        history: "skip",
-        ...(ps.persistence ? { persistence: ps.persistence } : {}),
-      } as ProviderInput);
+      await reopenOnPod(sessionId, ps);
       notice(sessionId, "info", "Reconnected on a new pod");
     } catch (error) {
       emit({
@@ -309,11 +431,30 @@ export async function connectKube(
     const { sessionId, config: session } = input;
     const repo = await (deps.detectRepo ?? detectRepo)(session.cwd);
     const plan = parseClonePlan(session.env);
-    const name = sandboxName(sessionId, repoName(repo.url), session.env[REF_ENV_KEYS.slug]);
-    const podCwd = podWorkdir(name);
     const { toolPolicy: _unenforceable, ...forwarded } = session;
 
-    await kube.apply(buildSandbox({ name, sessionId, config }));
+    // The agent may already have a sandbox: the plugin restarted, or the agent was suspended. Adopt it,
+    // so its volume (workspace and the agent's own session state) comes back with it.
+    const native = nativeSessionId(input.persistence);
+    const existing =
+      (await kube.listSandboxes(`${SESSION_LABEL}=${sessionLabel(sessionId)}`).catch(() => []))[0] ??
+      (native ? (await kube.listSandboxes(`${NATIVE_LABEL}=${sessionLabel(native)}`).catch(() => []))[0] : undefined);
+    let name: string;
+    let created = false;
+    if (existing) {
+      name = existing.name;
+    } else {
+      deps.pool?.noteRequest();
+      const warm = await deps.pool?.claim(sessionId).catch(() => null);
+      if (warm) {
+        name = warm;
+      } else {
+        name = sandboxName(sessionId, repoName(repo.url), session.env[REF_ENV_KEYS.slug]);
+        await kube.apply(buildSandbox({ name, sessionId, config }));
+      }
+      created = true;
+    }
+    const podCwd = podWorkdir(name);
     const ps: PodSession = {
       sandbox: name,
       localCwd: session.cwd,
@@ -322,6 +463,10 @@ export async function connectKube(
       toolPolicy: session.toolPolicy,
       inner: undefined as unknown as ProviderConnection,
       stopForwarding: () => undefined,
+      state: "running",
+      used: Boolean(input.persistence),
+      lastActivity: now(),
+      pendingPermissions: 0,
       opened: false,
       recovering: false,
       reopening: false,
@@ -329,6 +474,7 @@ export async function connectKube(
       recoveries: [],
     };
     try {
+      if (existing?.operatingMode === "Suspended") await kube.patchSandbox(name, resumePatch(config));
       await wait(name);
       await ensureWorkspace(ps, repo, plan);
       startPodBridge(ps);
@@ -336,12 +482,16 @@ export async function connectKube(
       sessions.set(sessionId, ps);
       await ps.inner.send({ ...input, config: { ...forwarded, cwd: podCwd } });
       ps.opened = true;
+      ps.lastActivity = now();
+      track(sessionId, ps, "running");
     } catch (error) {
       sessions.delete(sessionId);
+      deps.registry?.delete(sessionId);
       ps.stopForwarding();
       ps.bridge?.close();
       await ps.inner?.close().catch(() => undefined);
-      await deleteSandbox(name).catch(() => undefined);
+      // Only a sandbox made for this request is removed; an adopted one keeps the agent's workspace.
+      if (created) await deleteSandbox(name).catch(() => undefined);
       throw error;
     }
   }
@@ -357,6 +507,7 @@ export async function connectKube(
     if (!session) return;
     session.closing = true;
     sessions.delete(sessionId);
+    deps.registry?.delete(sessionId);
     session.stopForwarding();
     session.bridge?.close();
     await session.inner.close().catch(() => undefined);
@@ -393,7 +544,7 @@ export async function connectKube(
           const session = sessions.get(input.sessionId);
           if (session) {
             session.closing = true;
-            await session.inner.send(input).catch(() => undefined);
+            if (session.state === "running") await session.inner.send(input).catch(() => undefined);
           }
           try {
             await release(input.sessionId);
@@ -413,6 +564,14 @@ export async function connectKube(
           const session = sessions.get(input.sessionId);
           if (!session) throw new Error(`Unknown session ${input.sessionId}`);
           if (session.recovering) throw new Error("The pod is being replaced; try again once it has reconnected");
+          // Nothing is running while suspended, so there is nothing to interrupt and no pod worth waking.
+          if (input.type === "session.interrupt" && session.state !== "running") {
+            emit({ type: "request.completed", requestId: input.requestId });
+            return;
+          }
+          session.lastActivity = now();
+          if (input.type === "session.prompt") session.used = true;
+          await resume(input.sessionId, session); // a no-op while running; inputs during a resume queue behind it
           await session.inner.send(input);
         }
       }
@@ -423,8 +582,22 @@ export async function connectKube(
     },
     async close() {
       closed = true;
+      stopTicker();
       await Promise.allSettled([...opening.values()]);
-      await Promise.allSettled([...sessions.keys()].map(release));
+      // Closing the connection is not archiving an agent. With a persistent volume the pods are suspended
+      // (volume kept) and the next session.open finds them again; an ephemeral workspace has nothing to keep.
+      await Promise.allSettled(
+        [...sessions.entries()].map(async ([sessionId, ps]) => {
+          if (!persistent || !ps.used) return release(sessionId);
+          sessions.delete(sessionId);
+          deps.registry?.delete(sessionId);
+          ps.closing = true;
+          ps.stopForwarding();
+          ps.bridge?.close();
+          await ps.inner?.close().catch(() => undefined);
+          if (ps.state !== "suspended") await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used));
+        }),
+      );
       listeners.clear();
     },
   };

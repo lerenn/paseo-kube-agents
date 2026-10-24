@@ -33,6 +33,24 @@ export function parsePodInfo(pod: any): PodInfo {
   };
 }
 
+export interface SandboxInfo {
+  name: string;
+  labels: Record<string, string>;
+  annotations: Record<string, string>;
+  operatingMode: "Running" | "Suspended";
+  createdAt?: string;
+}
+
+export function parseSandboxList(json: any): SandboxInfo[] {
+  return (json?.items ?? []).map((item: any) => ({
+    name: item.metadata.name,
+    labels: item.metadata.labels ?? {},
+    annotations: item.metadata.annotations ?? {},
+    operatingMode: item.spec?.operatingMode === "Suspended" ? "Suspended" : "Running",
+    createdAt: item.metadata.creationTimestamp,
+  }));
+}
+
 export interface ExecResult {
   code: number;
   stdout: string;
@@ -45,6 +63,10 @@ export interface Kube {
   /** Current state of a pod, or null when it does not exist (yet). */
   podInfo(name: string): Promise<PodInfo | null>;
   exec(pod: string, argv: string[]): Promise<ExecResult>;
+  /** Merge-patches a Sandbox (suspend, resume, claim from the pool). */
+  patchSandbox(name: string, patch: Record<string, unknown>): Promise<void>;
+  /** Sandboxes matching a label selector. */
+  listSandboxes(selector: string): Promise<SandboxInfo[]>;
   /** Runs a command in the pod with `input` on its stdin (used to copy files in over the Kubernetes API). */
   execInput(pod: string, argv: string[], input: Readable): Promise<ExecResult>;
   /** Long-lived stdio JSON-RPC (ndjson) stream to a process inside the pod. */
@@ -197,6 +219,15 @@ export class Kubectl implements Kube {
       ["apply", "--server-side", `--field-manager=paseo-kube-agents-${key.toLowerCase()}`, "--force-conflicts", "-f", "-"],
       manifest,
     );
+  }
+
+  async patchSandbox(name: string, patch: Record<string, unknown>): Promise<void> {
+    await this.ok(["patch", "sandbox", name, "--type=merge", "-p", JSON.stringify(patch)]);
+  }
+
+  async listSandboxes(selector: string): Promise<SandboxInfo[]> {
+    const result = await this.ok(["get", "sandbox", "-l", selector, "-o", "json"]);
+    return parseSandboxList(JSON.parse(result.stdout));
   }
 
   async removeSecretKey(secret: string, key: string): Promise<void> {

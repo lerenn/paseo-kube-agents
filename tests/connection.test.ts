@@ -81,7 +81,7 @@ describe("kube connection", () => {
     const seen: ProviderEvent[] = [];
     full.onEvent((e) => seen.push(e));
     await full.send({ type: "session.open", requestId: "r", sessionId: "s2", config: sessionConfig(), history: "skip" });
-    expect((seen.find((e) => e.type === "session.opened") as any).capabilities).toEqual(["prompt.image"]);
+    expect((seen.find((e) => e.type === "session.opened") as any).capabilities).toEqual(["prompt.image", "session.persistence"]);
   });
 
   it("answers permission requests for preapproved MCP tools without prompting, others reach Paseo", async () => {
@@ -136,8 +136,31 @@ describe("kube connection", () => {
     expect(kube.calls.some((c) => c.startsWith("delete:sandbox/"))).toBe(true);
   });
 
-  it("deletes every pod when the connection closes", async () => {
+  it("suspends every pod, keeping the volumes, when the connection closes (it is not an archive)", async () => {
     const { kube, conn: p } = setup();
+    const conn = await p;
+    for (const id of ["a", "b"]) {
+      await conn.send({ type: "session.open", requestId: id, sessionId: id, config: sessionConfig(), history: "skip" });
+      await conn.send({ type: "session.prompt", sessionId: id, prompt: { clientMessageId: id, delivery: "auto", input: { type: "message", content: [{ type: "text", text: "hi" }] } } });
+    }
+    await conn.close();
+    expect(kube.calls.filter((c) => c.startsWith("delete:"))).toHaveLength(0);
+    const suspends = kube.patches2.filter((x) => x.patch.spec?.operatingMode === "Suspended");
+    expect(suspends).toHaveLength(2);
+    expect(Date.parse(suspends[0]!.patch.spec.shutdownTime) - Date.now()).toBeGreaterThan(7 * 24 * 3600 * 1000);
+  });
+
+  it("deletes sessions that were only opened, never prompted (drafts), when the connection closes", async () => {
+    const { kube, conn: p } = setup();
+    const conn = await p;
+    await conn.send({ type: "session.open", requestId: "d", sessionId: "draft", config: sessionConfig(), history: "skip" });
+    await conn.close();
+    expect(kube.calls.filter((c) => c.startsWith("delete:sandbox/"))).toHaveLength(1);
+    expect(kube.patches2.filter((x) => x.patch.spec?.operatingMode === "Suspended")).toHaveLength(0);
+  });
+
+  it("deletes every pod when the connection closes and the workspace is ephemeral", async () => {
+    const { kube, conn: p } = setup({ storage: { mode: "ephemeral", size: "10Gi" } });
     const conn = await p;
     for (const id of ["a", "b"]) {
       await conn.send({ type: "session.open", requestId: id, sessionId: id, config: sessionConfig(), history: "skip" });
@@ -145,6 +168,7 @@ describe("kube connection", () => {
     await conn.close();
     expect(kube.calls.filter((c) => c.startsWith("delete:sandbox/"))).toHaveLength(2);
   });
+
 });
 
 describe("kube connection edge cases", () => {
@@ -255,6 +279,13 @@ describe("kube connection edge cases", () => {
       history: "skip",
     });
     expect((acp.inputs[0] as any).config.toolPolicy).toBeUndefined();
+  });
+
+  it("advertises session persistence when offered, so Paseo can resume a closed or suspended agent", async () => {
+    const conn = await connectKube({ versions: [1], capabilities: ["session.persistence", "session.archive"] }, {
+      config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider,
+    });
+    expect(conn.capabilities).toEqual(["session.persistence"]);
   });
 
   it("only advertises capabilities the caller offered", async () => {

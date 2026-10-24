@@ -5,7 +5,7 @@ import type {
   ProviderInput,
   ProviderRegistration,
 } from "@getpaseo/plugin/server/provider";
-import type { ExecResult, Kube, PodInfo } from "../server/kube.js";
+import type { ExecResult, Kube, PodInfo, SandboxInfo } from "../server/kube.js";
 
 export class FakeKube implements Kube {
   calls: string[] = [];
@@ -18,6 +18,15 @@ export class FakeKube implements Kube {
   async apply(manifest: Record<string, unknown>) {
     this.calls.push("apply");
     this.applied.push(manifest);
+    const meta = (manifest as any).metadata ?? {};
+    if (meta.name) {
+      this.sandboxes.push({
+        name: meta.name,
+        labels: meta.labels ?? {},
+        annotations: meta.annotations ?? {},
+        operatingMode: "Running",
+      });
+    }
   }
   /** Scripted pod states, consumed in order; the last one repeats. */
   pods: (PodInfo | null)[] = [{ uid: "uid-1", ready: true, terminating: false }];
@@ -53,6 +62,22 @@ export class FakeKube implements Kube {
   namespace = "paseo-agents";
   patches: { key: string; manifest: string }[] = [];
   removed: string[] = [];
+  patches2: { name: string; patch: any }[] = [];
+  sandboxes: SandboxInfo[] = [];
+  async patchSandbox(name: string, patch: Record<string, unknown>) {
+    this.calls.push(`patch:${name}`);
+    this.patches2.push({ name, patch });
+    const sb = this.sandboxes.find((s) => s.name === name);
+    const spec = (patch as any).spec;
+    if (sb && spec?.operatingMode) sb.operatingMode = spec.operatingMode;
+    const meta = (patch as any).metadata;
+    if (sb && meta?.labels) sb.labels = { ...sb.labels, ...meta.labels };
+    if (sb && meta?.annotations) sb.annotations = { ...sb.annotations, ...meta.annotations };
+  }
+  async listSandboxes(selector: string) {
+    const [k, v] = selector.split("=");
+    return this.sandboxes.filter((s) => (v === undefined ? k! in s.labels : s.labels[k!] === v));
+  }
   removeError?: Error;
   async removeSecretKey(_secret: string, key: string) {
     if (this.removeError) throw this.removeError;
@@ -65,6 +90,7 @@ export class FakeKube implements Kube {
   }
   async delete(kind: string, name: string) {
     this.calls.push(`delete:${kind}/${name}`);
+    if (kind === "sandbox") this.sandboxes = this.sandboxes.filter((s) => s.name !== name);
   }
 }
 

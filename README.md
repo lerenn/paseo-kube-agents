@@ -44,6 +44,23 @@ Paseo daemon                                   cluster (paseo-agents)
 - **Credentials**: only `CLAUDE_CODE_OAUTH_TOKEN`, read from the Secret `paseo-agent-credentials` by reference
   (never inline, never the whole Secret). Pods have no ServiceAccount token, run non-root, and have a hard
   `shutdownTime` (default 8h) as a backstop for leaked pods.
+- **Idle suspension**: an agent idle (no turn running, nothing waiting on a permission) for `podIdleMinutes`
+  (default 30, 0 = never) has its pod deleted with the Sandbox's `operatingMode: Suspended`; its volume, and the
+  agent's saved session handle, stay. Any input (a prompt, a steer from another plugin or agent) recreates the pod on
+  the same volume with the current image and settings, reopens the session from its handle, and then delivers the
+  message; inputs that arrive meanwhile queue behind the resume. If the pod cannot be scheduled (the volume is bound
+  to a zone with no capacity), the screen and the agent show why, the sandbox is released again, and the next input
+  retries. Suspended sandboxes live 14 days. Closing the plugin suspends pods instead of deleting them; the agent's
+  sandbox is found again by a per-session label when Paseo reopens the session. Only archiving deletes the volume.
+- **Warm pool** (off by default): `warmPool.size` pre-started Sandboxes (same image, settings and volume as a real
+  agent) so a new agent skips scheduling and volume binding. A new pod agent claims a ready one (relabelled to its
+  session) and is then seeded, tunnelled and credentialed as usual; the pool refills behind it. Pods built for old
+  settings (image, resources, placement, storage) are recycled. After `warmPool.idleMinutes` (default 60) with no
+  pod agent requested the pool scales to 0 so burst nodes can go; the next request wakes it and is itself cold.
+  Disabling the pool deletes it. Managed by the plugin: the agent-sandbox warm pool CRDs are not installed, and the
+  pool needs no verbs beyond the Sandbox ones the daemon already has. Warm pods are only for new agents: a resumed
+  agent needs its own volume, which is bound to its own zone. The Status section of the screen shows the pool
+  (active, or asleep since...) and each pod agent (running or suspended).
 - **Storage and restarts**: `/workspace` (the clone, plus `HOME` so the agent's session state) is a plain
   ReadWriteOnce PVC from the Sandbox's `volumeClaimTemplates` (default 10Gi, default StorageClass; settable, or
   `ephemeral` for an emptyDir). When the pod is lost (eviction, node loss, delete) the Sandbox controller
