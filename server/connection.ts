@@ -13,7 +13,7 @@ import type { AcpConnector } from "@getpaseo/plugin/server/acp";
 import type { KubeAgentsConfig } from "./config.js";
 import type { Kube } from "./kube.js";
 import { PodRegistry, type PodState } from "./registry.js";
-import { NATIVE_LABEL, SESSION_LABEL, buildSandbox, nativeSessionId, resumePatch, sandboxName, sessionLabel, suspendPatch, usedPatch, workspaceClaimName } from "./sandbox.js";
+import { ACP_ANNOTATION, NATIVE_LABEL, SESSION_LABEL, buildSandbox, nativeSessionId, resumePatch, sandboxName, sessionLabel, suspendPatch, usedPatch, workspaceClaimName } from "./sandbox.js";
 import { REF_ENV_KEYS } from "../shared/pod-ref.js";
 import { createCatalogSource } from "./catalog.js";
 import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
@@ -62,7 +62,7 @@ export interface ConnectionDeps {
   /** Builds the seed bundle from the daemon's checkout (injected for tests). */
   seeder?: (cwd: string, plan: ClonePlan | null, currentBranch: string) => Promise<SeedBundle>;
   /** Pre-started pods for new agents (see WarmPool); absent when pooling is not wired. */
-  pool?: { noteRequest(): void; claim(sessionId: string, agentId?: string): Promise<string | null> };
+  pool?: { noteRequest(): void; claim(sessionId: string, agentId?: string, handleId?: string): Promise<string | null> };
   /** This daemon's id, written on every sandbox and volume claim so the reaper only ever considers its own. */
   daemonId?: string;
   /** Where session states are published for the Kube Agents screen. */
@@ -111,8 +111,10 @@ interface PodSession {
   stopForwarding: () => void;
   /** The agent's own session handle, so a replacement pod can resume the conversation. */
   persistence?: ProviderPersistence;
-  /** The native session id already written to the sandbox label. */
-  nativeLabelled?: string;
+  /** What Paseo saves to reopen this agent: minted here, stable, never the agent process's own handle. */
+  handle: ProviderPersistence;
+  /** The agent process's own session handle last written to the sandbox. */
+  acpWritten?: string;
   turnId?: string;
   /** Running, suspended (pod deleted, volume kept) or coming back. */
   state: PodState;
@@ -255,22 +257,22 @@ export async function connectKube(
     return inner;
   }
 
-  /** Keeps the agent's handle, and labels the sandbox with it so a reopened session (new Paseo id) finds it. */
-  function remember(sessionId: string, ps: PodSession, persistence: ProviderPersistence): void {
-    const changed = JSON.stringify(ps.persistence) !== JSON.stringify(persistence);
+  /** Keeps the agent process's own handle, on the sandbox too, so a later pod (or plugin) can resume its conversation. */
+  function remember(ps: PodSession, persistence: ProviderPersistence): void {
     ps.persistence = persistence;
-    // The reopen's own `session.opened` is hidden from Paseo, so tell it the handle it must save to resume this agent.
-    if (changed && ps.reopening) emit({ type: "session.persistence", sessionId, persistence });
-    const native = nativeSessionId(persistence);
-    if (!native || ps.nativeLabelled === native) return;
-    ps.nativeLabelled = native;
-    void kube.patchSandbox(ps.sandbox, { metadata: { labels: { [NATIVE_LABEL]: sessionLabel(native) } } }).catch(() => undefined);
+    const serialized = JSON.stringify(persistence);
+    if (!ps.sandbox || ps.acpWritten === serialized) return;
+    ps.acpWritten = serialized;
+    void kube.patchSandbox(ps.sandbox, { metadata: { annotations: { [ACP_ANNOTATION]: serialized } } }).catch(() => undefined);
   }
 
   function onInnerEvent(sessionId: string, ps: PodSession, inner: ProviderConnection, event: ProviderEvent) {
     if (inner !== ps.inner) return;
-    if (event.type === "session.opened" && event.persistence) remember(sessionId, ps, event.persistence);
-    if (event.type === "session.persistence" && event.sessionId === sessionId) remember(sessionId, ps, event.persistence);
+    if (event.type === "session.opened" && event.persistence) remember(ps, event.persistence);
+    if (event.type === "session.persistence" && event.sessionId === sessionId) {
+      remember(ps, event.persistence);
+      return; // Paseo keeps the handle this plugin gave it, not the agent process's
+    }
     if (event.type === "session.turn" && event.sessionId === sessionId) {
       ps.turnId = event.state === "started" ? event.turnId : undefined;
       ps.lastActivity = now();
@@ -311,7 +313,7 @@ export async function connectKube(
       }
     }
     if (event.type === "session.permission" && event.sessionId === sessionId) ps.pendingPermissions++;
-    emit(toLocal(event, sessionId, ps.podCwd, ps.localCwd, capabilities));
+    emit(toLocal(event, sessionId, ps.podCwd, ps.localCwd, capabilities, ps.handle));
   }
 
   /** Waits for the pod, makes sure the workspace is there, and reopens the agent's session in it. */
@@ -362,9 +364,10 @@ export async function connectKube(
   /** Creates (or claims from the warm pool) the sandbox of a session that has been open without one. */
   async function materialize(sessionId: string, ps: PodSession): Promise<void> {
     deps.pool?.noteRequest();
-    const warm = await deps.pool?.claim(sessionId, ps.agentId).catch(() => null);
+    const handleId = nativeSessionId(ps.handle);
+    const warm = await deps.pool?.claim(sessionId, ps.agentId, handleId).catch(() => null);
     const name = warm ?? sandboxName(sessionId, repoName(ps.repo.url), ps.slug);
-    if (!warm) await kube.apply(buildSandbox({ name, sessionId, config, daemonId: deps.daemonId, agentId: ps.agentId }));
+    if (!warm) await kube.apply(buildSandbox({ name, sessionId, config, daemonId: deps.daemonId, agentId: ps.agentId, handleId }));
     ps.sandbox = name;
     ps.podCwd = podWorkdir(name);
     ps.config = { ...ps.config, cwd: ps.podCwd };
@@ -491,7 +494,7 @@ export async function connectKube(
       sessionId,
       capabilities,
       restoration: "core",
-      ...(input.persistence ? { persistence: input.persistence } : {}),
+      persistence: ps.handle,
       cwd: ps.localCwd,
       ...(session.title ? { title: session.title } : {}),
     });
@@ -521,6 +524,8 @@ export async function connectKube(
     // so its volume (workspace and the agent's own session state) comes back with it.
     const agentId = session.env.PASEO_KUBE_AGENT_ID || undefined;
     const native = nativeSessionId(input.persistence);
+    const handleId = native ?? sessionId;
+    const handle: ProviderPersistence = input.persistence ?? { version: 1, data: { sessionId } };
     const existing =
       (await kube.listSandboxes(`${SESSION_LABEL}=${sessionLabel(sessionId)}`).catch(() => []))[0] ??
       (native ? (await kube.listSandboxes(`${NATIVE_LABEL}=${sessionLabel(native)}`).catch(() => []))[0] : undefined);
@@ -534,6 +539,7 @@ export async function connectKube(
       toolPolicy: session.toolPolicy,
       inner: undefined as unknown as ProviderConnection,
       stopForwarding: () => undefined,
+      handle,
       used: Boolean(input.persistence),
       lastActivity: now(),
       pendingPermissions: 0,
@@ -554,7 +560,7 @@ export async function connectKube(
         deferred: !existing,
         podCwd,
         config: { ...forwarded, cwd: podCwd },
-        persistence: input.persistence,
+        persistence: acpHandle(existing?.annotations) ?? input.persistence,
         state: "suspended",
         opened: true,
       };
@@ -570,18 +576,19 @@ export async function connectKube(
       name = existing.name;
     } else {
       deps.pool?.noteRequest();
-      const warm = await deps.pool?.claim(sessionId, agentId).catch(() => null);
+      const warm = await deps.pool?.claim(sessionId, agentId, handleId).catch(() => null);
       if (warm) {
         name = warm;
       } else {
         name = sandboxName(sessionId, repoName(repo.url), slug);
-        await kube.apply(buildSandbox({ name, sessionId, config, daemonId: deps.daemonId, agentId }));
+        await kube.apply(buildSandbox({ name, sessionId, config, daemonId: deps.daemonId, agentId, handleId }));
       }
       created = true;
     }
     const podCwd = podWorkdir(name);
     const ps: PodSession = {
       ...base,
+      persistence: acpHandle(existing?.annotations) ?? input.persistence,
       sandbox: name,
       deferred: false,
       podCwd,
@@ -597,7 +604,9 @@ export async function connectKube(
       startPodBridge(ps);
       await startInner(sessionId, ps);
       sessions.set(sessionId, ps);
-      await ps.inner.send({ ...input, config: { ...forwarded, cwd: podCwd } });
+      // The agent process is opened with its own handle (kept on the sandbox), never the one Paseo saved.
+      const { persistence: _paseoHandle, ...openInput } = input;
+      await ps.inner.send({ ...openInput, ...(ps.persistence ? { persistence: ps.persistence } : {}), config: { ...forwarded, cwd: podCwd } });
       ps.opened = true;
       ps.lastActivity = now();
       track(sessionId, ps, "running");
@@ -735,16 +744,28 @@ export async function connectKube(
  * Pod paths never leak to Paseo: it only knows the daemon-local checkout. A session may only report
  * capabilities the connection advertised, so the agent's own list is clipped to those.
  */
+/** The agent process's own handle, as last written to the sandbox. */
+function acpHandle(annotations: Record<string, string> | undefined): ProviderPersistence | undefined {
+  try {
+    const raw = annotations?.[ACP_ANNOTATION];
+    return raw ? (JSON.parse(raw) as ProviderPersistence) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function toLocal(
   event: ProviderEvent,
   sessionId: string,
   podCwd: string,
   localCwd: string,
   advertised: readonly string[],
+  handle: ProviderPersistence,
 ): ProviderEvent {
   if (event.type === "session.opened" && event.sessionId === sessionId) {
     return {
       ...event,
+      persistence: handle,
       cwd: event.cwd === podCwd ? localCwd : event.cwd,
       capabilities: event.capabilities.filter((c) => advertised.includes(c)),
     };

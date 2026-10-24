@@ -212,11 +212,25 @@ describe("finding an agent by its own session handle", () => {
     expect(kube.patches2[0]!.patch.spec.operatingMode).toBe("Running");
   });
 
-  it("labels the sandbox with the agent's handle once the session reports it", async () => {
+  it("labels the sandbox with the handle Paseo saved, and keeps the agent process's own handle privately", async () => {
     const t = await setup();
     await flush();
-    const label = t.kube.patches2.find((p) => p.patch.metadata?.labels?.["paseo.sh/native"]);
-    expect(label?.patch.metadata.labels["paseo.sh/native"]).toBe(sessionLabel("native-s1"));
+    expect((t.kube.applied[0] as any).metadata.labels["paseo.sh/native"]).toBe(sessionLabel("s1")); // the minted handle
+    const own = t.kube.patches2.find((p) => p.patch.metadata?.annotations?.["paseo.sh/acp-handle"]);
+    expect(JSON.parse(own!.patch.metadata.annotations["paseo.sh/acp-handle"])).toEqual({ version: 1, data: { sessionId: "native-s1" } });
+    // Paseo is only ever shown the minted handle
+    const opened = t.events.find((e) => e.type === "session.opened") as any;
+    expect(opened.persistence).toEqual({ version: 1, data: { sessionId: "s1" } });
+  });
+
+  it("resumes the agent process's own conversation from the sandbox, whichever id Paseo reopens it under", async () => {
+    const kube = new FakeKube();
+    kube.sandboxes = [{ name: "pka-x-1", labels: { "paseo.sh/native": sessionLabel("s1") }, annotations: { "paseo.sh/acp-handle": JSON.stringify({ version: 1, data: { sessionId: "native-private" } }) }, operatingMode: "Suspended" }];
+    kube.hasClone = true;
+    const acp = new FakeAcp();
+    const conn = await connectKube({ versions: [1], capabilities: [] }, { config: ConfigSchema.parse({}), kube, acpProvider: acp.provider, detectRepo: repo, seeder: fakeSeeder, eager: true, sleep: async () => undefined, now: () => 1 });
+    await conn.send({ type: "session.open", requestId: "r", sessionId: "new-paseo-id", config: cfg(), history: "skip", persistence: { version: 1, data: { sessionId: "s1" } } });
+    expect((acp.inputs[0] as any).persistence).toEqual({ version: 1, data: { sessionId: "native-private" } });
   });
 });
 

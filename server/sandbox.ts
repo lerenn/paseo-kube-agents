@@ -26,6 +26,8 @@ export const DAEMON_LABEL = "paseo.sh/daemon";
 export const AGENT_LABEL = "paseo.sh/agent";
 /** The agent's own session handle (stable across Paseo reopening the session under a new id). */
 export const NATIVE_LABEL = "paseo.sh/native";
+/** The agent process's own session handle (JSON), kept privately: Paseo is given the plugin-minted handle instead. */
+export const ACP_ANNOTATION = "paseo.sh/acp-handle";
 
 export function nativeSessionId(persistence: { data?: unknown } | undefined): string | undefined {
   const data = persistence?.data;
@@ -67,11 +69,13 @@ export interface SandboxSpecInput {
   /** The owning daemon and Paseo agent, for the orphan reaper. */
   daemonId?: string;
   agentId?: string;
+  /** The handle Paseo saved for the agent; labels the sandbox so the agent finds it again. */
+  handleId?: string;
 }
 
 /** A `Sandbox` (agents.x-k8s.io) whose single container idles; the agent is started by `kubectl exec`. */
 export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
-  const { name, sessionId, config, pool, daemonId, agentId } = input;
+  const { name, sessionId, config, pool, daemonId, agentId, handleId } = input;
   const labels = {
     [MANAGED_BY_LABEL]: MANAGED_BY,
   };
@@ -81,7 +85,7 @@ export function buildSandbox(input: SandboxSpecInput): Record<string, unknown> {
   };
   const sandboxLabels = pool
     ? { ...labels, ...owner, [POOL_LABEL]: "warm" }
-    : { ...labels, ...owner, [SESSION_LABEL]: sessionLabel(sessionId) };
+    : { ...labels, ...owner, [SESSION_LABEL]: sessionLabel(sessionId), ...(handleId ? { [NATIVE_LABEL]: sessionLabel(handleId) } : {}) };
   return {
     apiVersion: config.sandboxApiVersion,
     kind: "Sandbox",
@@ -185,10 +189,10 @@ export function usedPatch() {
 }
 
 /** Ties a warm sandbox to the agent that claimed it, and gives it a fresh lifetime. */
-export function claimPatch(sessionId: string, config: KubeAgentsConfig, agentId?: string) {
+export function claimPatch(sessionId: string, config: KubeAgentsConfig, agentId?: string, handleId?: string) {
   return {
     metadata: {
-      labels: { [POOL_LABEL]: "claimed", [SESSION_LABEL]: sessionLabel(sessionId), ...(agentId ? { [AGENT_LABEL]: agentId } : {}) },
+      labels: { [POOL_LABEL]: "claimed", [SESSION_LABEL]: sessionLabel(sessionId), ...(agentId ? { [AGENT_LABEL]: agentId } : {}), ...(handleId ? { [NATIVE_LABEL]: sessionLabel(handleId) } : {}) },
       annotations: { "paseo.sh/session-id": sessionId },
     },
     spec: { shutdownTime: new Date(Date.now() + config.maxLifetimeSeconds * 1000).toISOString() },

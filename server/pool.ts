@@ -83,7 +83,7 @@ export class WarmPool {
   }
 
   /** Reserves a ready warm pod for `sessionId`, or returns null (disabled, asleep, none ready or all stale). */
-  async claim(sessionId: string, agentId?: string): Promise<string | null> {
+  async claim(sessionId: string, agentId?: string, handleId?: string): Promise<string | null> {
     const config = await this.deps.getConfig();
     if (!config.warmPool.enabled || this.state.asleepSince) return null;
     const kube = this.deps.kubeFor(config);
@@ -92,7 +92,7 @@ export class WarmPool {
     for (const sandbox of warm) {
       const pod = await kube.podInfo(sandbox.name).catch(() => null);
       if (!pod?.ready || pod.terminating) continue;
-      await kube.patchSandbox(sandbox.name, claimPatch(sessionId, config, agentId));
+      await kube.patchSandbox(sandbox.name, claimPatch(sessionId, config, agentId, handleId));
       void this.kick();
       return sandbox.name;
     }

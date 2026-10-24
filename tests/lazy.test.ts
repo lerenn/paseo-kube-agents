@@ -48,7 +48,7 @@ describe("opening a session costs nothing", () => {
     expect(events.at(-1)).toEqual({ type: "request.completed", requestId: "c" });
   });
 
-  it("the first message creates the sandbox, starts the agent, hands Paseo the session handle, then delivers", async () => {
+  it("the open gives Paseo a stable handle; the first message creates the sandbox, starts the agent, then delivers", async () => {
     const { kube, events, acp, conn } = await setup({ daemonId: "srv_ME" });
     await conn.send({ type: "session.open", requestId: "r", sessionId: "s1", config: cfg({ PASEO_KUBE_AGENT_ID: "agent-1" }), history: "skip" });
     await conn.send(prompt("s1"));
@@ -56,9 +56,12 @@ describe("opening a session costs nothing", () => {
     expect((kube.applied[0] as any).metadata.labels).toMatchObject({ "paseo.sh/daemon": "srv_ME", "paseo.sh/agent": "agent-1" });
     expect(acp.inputs.map((i: any) => i.type)).toEqual(["session.open", "session.prompt"]);
     expect(acp.inputs[0]).toMatchObject({ requestId: expect.stringMatching(/^recover-/) });
-    // Paseo only learns the agent's own handle through this event: the reopen's session.opened is hidden
-    expect(events.filter((e) => e.type === "session.opened")).toHaveLength(1);
-    expect(events.find((e) => e.type === "session.persistence")).toMatchObject({ persistence: { data: { sessionId: "native-s1" } } });
+    // Paseo saved the handle it was given when the session opened (it only saves it from session.opened), and
+    // never sees the agent process's own handle
+    const opened = events.filter((e) => e.type === "session.opened") as any[];
+    expect(opened).toHaveLength(1);
+    expect(opened[0].persistence).toEqual({ version: 1, data: { sessionId: "s1" } });
+    expect(events.some((e) => e.type === "session.persistence")).toBe(false);
     expect(events.map((e: any) => e.notice?.title).filter(Boolean)).toEqual(expect.arrayContaining(["Starting the pod...", "Pod started"]));
   });
 
