@@ -41,6 +41,9 @@ const SUPPORTED_CAPABILITIES = [
   "permission",
   "permission.tool_policy",
   "prompt.image",
+  // Paseo reopens a closed agent (after a plugin restart, or once suspended) from its saved handle; without
+  // this capability it refuses to resume the session at all.
+  "session.persistence",
 ];
 
 export interface ConnectionDeps {

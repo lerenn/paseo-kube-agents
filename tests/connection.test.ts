@@ -81,7 +81,7 @@ describe("kube connection", () => {
     const seen: ProviderEvent[] = [];
     full.onEvent((e) => seen.push(e));
     await full.send({ type: "session.open", requestId: "r", sessionId: "s2", config: sessionConfig(), history: "skip" });
-    expect((seen.find((e) => e.type === "session.opened") as any).capabilities).toEqual(["prompt.image"]);
+    expect((seen.find((e) => e.type === "session.opened") as any).capabilities).toEqual(["prompt.image", "session.persistence"]);
   });
 
   it("answers permission requests for preapproved MCP tools without prompting, others reach Paseo", async () => {
@@ -279,6 +279,13 @@ describe("kube connection edge cases", () => {
       history: "skip",
     });
     expect((acp.inputs[0] as any).config.toolPolicy).toBeUndefined();
+  });
+
+  it("advertises session persistence when offered, so Paseo can resume a closed or suspended agent", async () => {
+    const conn = await connectKube({ versions: [1], capabilities: ["session.persistence", "session.archive"] }, {
+      config: ConfigSchema.parse({}), kube: new FakeKube(), acpProvider: new FakeAcp().provider,
+    });
+    expect(conn.capabilities).toEqual(["session.persistence"]);
   });
 
   it("only advertises capabilities the caller offered", async () => {
