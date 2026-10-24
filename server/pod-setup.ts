@@ -58,6 +58,10 @@ git -C "$dir" config remote.origin.pushurl "$HOME/outbox.git"
 git -C "$dir" config user.name "$5"
 git -C "$dir" config user.email "$6"
 echo "$7" > "$HOME/seed.sha"
+# a seeded branch tracks its remote branch, so a plain git pull works; a PR seed or a new branch has none yet
+if [ -z "$8" ]; then
+  case "$3" in pr-*) ;; *) git -C "$dir" config "branch.$3.remote" origin; git -C "$dir" config "branch.$3.merge" "refs/heads/$3" ;; esac
+fi
 if [ -n "$8" ]; then git -C "$dir" checkout -q -b "$8"; fi
 rm -f "$HOME/seed.bundle"
 `;

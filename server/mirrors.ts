@@ -83,6 +83,7 @@ export async function fetchTargets(
 export const MIRROR_SETUP_SCRIPT = `set -e
 mkdir -p "$HOME/mirrors"
 git config --global protocol.file.allow always
+git config --global push.autoSetupRemote true
 git config --global remote.origin.uploadpack "$HOME/bin/paseo-upload-pack"
 cwd="$1"; shift
 while [ $# -gt 0 ]; do
