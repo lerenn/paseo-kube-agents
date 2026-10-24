@@ -177,6 +177,32 @@ describe("exec: real provider processes in the pod", () => {
   });
 });
 
+describe("the 30 second limit on prepare", () => {
+  it("returns from prepare when the window ends while the pod is still starting, and exec waits for the rest", async () => {
+    const t = setup({}, { startWindowMs: 0 });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const exec = t.kube.exec.bind(t.kube);
+    t.kube.exec = async (pod: string, argv: string[]) => {
+      if (argv[2]?.includes("git init")) await gate; // seeding is slow
+      return exec(pod, argv);
+    };
+    await t.prepare(); // returns without error although seeding has not finished
+    expect(t.kube.execs.some((e) => e.argv[2]?.includes("git init"))).toBe(false);
+    const started = t.reg.exec!({ ...t.base, purpose: "session", argv: ["claude"], env: {} } as never, { ...t.ctx });
+    release();
+    await started;
+    expect(t.kube.execs.some((e) => e.argv[2]?.includes("git init"))).toBe(true);
+    expect(t.registry.list()[0]!.state).toBe("running");
+  });
+
+  it("still reports a failure that happens inside the window", async () => {
+    const t = setup({ readyTimeoutSeconds: 1 });
+    t.kube.pods = [{ uid: "u", ready: false, terminating: false, problem: "Pod cannot be scheduled: no capacity" }];
+    await expect(t.prepare()).rejects.toThrow(/could not start the pod/);
+  });
+});
+
 describe("labels for people", () => {
   it("labels with the agent that ran, follows suspension and renames, and patches the pod and claim too", async () => {
     const t = setup({ podIdleMinutes: 30 });

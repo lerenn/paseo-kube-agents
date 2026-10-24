@@ -65,6 +65,8 @@ export interface RuntimeDeps {
   /** Calls `fn` every `ms` until the returned stop function runs (injected for tests). */
   ticker?: (fn: () => void, ms: number) => () => void;
   sleep?: (ms: number) => Promise<void>;
+  /** How long `prepare` and `beforeInput` wait for the pod before returning and letting `exec` wait (Paseo gives them 30s). */
+  startWindowMs?: number;
   now?: () => number;
   log?: (line: string) => void;
 }
@@ -81,6 +83,10 @@ interface WorkspaceState {
   phase: PodState | "none";
   bridge?: RunningBridge;
   ports: Set<number>;
+  /** Loopback ports every launch so far asked for; kept so a later `exec` starts the same bridge `prepare` asked for. */
+  wantPorts: Set<number>;
+  /** The latest call's notice channel, used by work that outlives the call that started it. */
+  notice?: WorkspaceRuntimeContext["notice"];
   /** Remotes the pod may fetch from (the project's origin and its submodules), served through the bridge. */
   targets: FetchTarget[];
   /** What the Sandbox, pod and claim were last labelled with, so they are only patched when it changes. */
@@ -157,6 +163,7 @@ export class KubernetesRuntime {
       options,
       phase: "none",
       ports: new Set(),
+      wantPorts: new Set(),
       targets: [],
       commands: new Set(),
       agents: new Map(),
@@ -260,7 +267,8 @@ export class KubernetesRuntime {
     const config = await this.deps.getConfig();
     const kube = this.deps.kubeFor(config);
     const { cwd } = ws.options;
-    const wanted = new Set([...ws.ports, ...loopbackPorts((need.mcpServers ?? {}) as Record<string, { type: string; url?: string }>, [need.env?.PASEO_GITHUB_PROXY_URL])]);
+    for (const port of loopbackPorts((need.mcpServers ?? {}) as Record<string, { type: string; url?: string }>, [need.env?.PASEO_GITHUB_PROXY_URL])) ws.wantPorts.add(port);
+    const wanted = new Set([...ws.ports, ...ws.wantPorts]);
     const grows = [...wanted].some((p) => !ws.ports.has(p));
 
     // Fast path: the same pod is up and everything this launch needs is already in place.
@@ -420,14 +428,43 @@ export class KubernetesRuntime {
   async prepare(request: WorkspaceRuntimePrepareRequest, ctx: WorkspaceRuntimeContext): Promise<void> {
     const ws = this.workspace(request);
     ws.agent = request.env.PASEO_AGENT_ID?.slice(0, 8) ?? ws.agent;
-    await this.serial(ws, () => this.ensureReady(ws, ctx, { command: request.argv[0], mcpServers: request.mcpServers, env: request.env }));
+    await this.withinWindow(ws, ctx, () => this.ensureReady(ws, this.detached(ws, ctx), { command: request.argv[0], mcpServers: request.mcpServers, env: request.env }));
+  }
+
+  /** A context whose notices keep reaching the latest call after the call that started the work has returned. */
+  private detached(ws: WorkspaceState, ctx: WorkspaceRuntimeContext): WorkspaceRuntimeContext {
+    ws.notice = ctx.notice;
+    return { ...ctx, notice: (message, level) => ws.notice?.(message, level) };
+  }
+
+  /**
+   * Paseo gives `prepare` and `beforeInput` 30 seconds, and a first pod (scheduling, image pull, volume, seeding,
+   * installing the CLI) can take longer. Work runs on the workspace's queue regardless; the call returns when it is
+   * done or when the window ends, and `exec`, which has no deadline, waits for the rest.
+   */
+  private async withinWindow(ws: WorkspaceState, ctx: WorkspaceRuntimeContext, work: () => Promise<void>): Promise<void> {
+    ws.notice = ctx.notice;
+    const job = this.serial(ws, work);
+    const window = this.deps.startWindowMs ?? 20_000;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const waited = await Promise.race([
+      job.then(() => "done" as const),
+      new Promise<"late">((resolve) => {
+        timer = setTimeout(() => resolve("late"), window);
+        (timer as { unref?: () => void }).unref?.();
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (waited === "late") {
+      ctx.notice("The pod is still starting; the agent starts when it is ready.");
+      job.catch(() => undefined); // a failure now is raised again by the launch that follows (exec retries from a clean state)
+    }
   }
 
   async beforeInput(request: WorkspaceRuntimeInputRequest, ctx: WorkspaceRuntimeContext): Promise<void> {
     const ws = this.workspace(request);
     ws.lastActivity = this.now();
-    await this.serial(ws, async () => {
-      if (ws.phase === "suspended" || ws.phase === "resuming") await this.ensureReady(ws, ctx, {});
+    await this.withinWindow(ws, ctx, async () => {
+      if (ws.phase === "suspended" || ws.phase === "resuming") await this.ensureReady(ws, this.detached(ws, ctx), {});
     });
   }
 
@@ -485,7 +522,8 @@ export class KubernetesRuntime {
   async exec(request: WorkspaceRuntimeExecRequest, ctx: WorkspaceRuntimeContext & { signal: AbortSignal }): Promise<WorkspaceRuntimeProcess> {
     const ws = this.workspace(request);
     if (request.purpose === "probe") throw new Error("Probes run on the daemon host; the Kubernetes Runtime does not start them");
-    await this.serial(ws, () => this.ensureReady(ws, ctx, { command: request.argv[0], env: request.env }));
+    ws.notice = ctx.notice;
+    await this.serial(ws, () => this.ensureReady(ws, this.detached(ws, ctx), { command: request.argv[0], env: request.env }));
     const config = await this.deps.getConfig();
     const kube = this.deps.kubeFor(config);
     const pod = ws.sandbox!;
