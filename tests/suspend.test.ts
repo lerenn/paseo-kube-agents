@@ -55,6 +55,7 @@ async function setup(settings: object = {}, deps: object = {}) {
 describe("idle suspension", () => {
   it("deletes an idle agent's pod after podIdleMinutes and keeps its volume", async () => {
     const t = await setup();
+    await t.conn.send(promptInput("s1")); // an agent in use, not a draft
     t.advance(29 * MIN);
     await t.tick();
     expect(t.registry.list()[0]!.state).toBe("running");
@@ -67,6 +68,19 @@ describe("idle suspension", () => {
     expect(t.registry.list()[0]!.state).toBe("suspended");
     expect(t.notices().at(-1)).toMatch(/Pod suspended/);
     expect(t.acp.closed).toBe(true);
+  });
+
+  it("keeps an unused draft's volume only an hour when it sits idle, and a prompt resets the lifetime", async () => {
+    const draft = await setup();
+    draft.advance(31 * MIN);
+    await draft.tick();
+    const suspend = draft.kube.patches2.at(-1)!.patch;
+    expect(Date.parse(suspend.spec.shutdownTime) - Date.now()).toBeLessThan(2 * 3600 * 1000);
+    await draft.conn.send(promptInput("s1"));
+    expect(Date.parse(draft.kube.patches2.at(-1)!.patch.spec.shutdownTime) - Date.now()).toBeGreaterThan(7 * 3600 * 1000); // the normal 8h again
+    draft.advance(31 * MIN);
+    await draft.tick();
+    expect(Date.parse(draft.kube.patches2.at(-1)!.patch.spec.shutdownTime) - Date.now()).toBeGreaterThan(7 * 24 * 3600 * 1000); // now an agent in use
   });
 
   it("does not suspend an agent that is working or waiting on a permission, or when disabled", async () => {

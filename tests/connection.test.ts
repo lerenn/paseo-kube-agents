@@ -141,10 +141,22 @@ describe("kube connection", () => {
     const conn = await p;
     for (const id of ["a", "b"]) {
       await conn.send({ type: "session.open", requestId: id, sessionId: id, config: sessionConfig(), history: "skip" });
+      await conn.send({ type: "session.prompt", sessionId: id, prompt: { clientMessageId: id, delivery: "auto", input: { type: "message", content: [{ type: "text", text: "hi" }] } } });
     }
     await conn.close();
     expect(kube.calls.filter((c) => c.startsWith("delete:"))).toHaveLength(0);
-    expect(kube.patches2.filter((x) => x.patch.spec.operatingMode === "Suspended")).toHaveLength(2);
+    const suspends = kube.patches2.filter((x) => x.patch.spec.operatingMode === "Suspended");
+    expect(suspends).toHaveLength(2);
+    expect(Date.parse(suspends[0]!.patch.spec.shutdownTime) - Date.now()).toBeGreaterThan(7 * 24 * 3600 * 1000);
+  });
+
+  it("deletes sessions that were only opened, never prompted (drafts), when the connection closes", async () => {
+    const { kube, conn: p } = setup();
+    const conn = await p;
+    await conn.send({ type: "session.open", requestId: "d", sessionId: "draft", config: sessionConfig(), history: "skip" });
+    await conn.close();
+    expect(kube.calls.filter((c) => c.startsWith("delete:sandbox/"))).toHaveLength(1);
+    expect(kube.patches2.filter((x) => x.patch.spec.operatingMode === "Suspended")).toHaveLength(0);
   });
 
   it("deletes every pod when the connection closes and the workspace is ephemeral", async () => {

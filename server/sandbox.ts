@@ -22,8 +22,13 @@ export function sandboxName(sessionId: string, repo?: string, slug?: string): st
 export const SESSION_LABEL = "paseo.sh/session";
 export const POOL_LABEL = "paseo.sh/pool";
 export const SPEC_HASH_ANNOTATION = "paseo.sh/spec-hash";
-/** A suspended sandbox keeps its volume this long, so an idle agent can be resumed days later. */
-export const SUSPENDED_RETENTION_DAYS = 14;
+/** A suspended agent's volume is kept this long, so it can be resumed days later. */
+export const SUSPENDED_RETENTION_HOURS = 14 * 24;
+/**
+ * An agent that was never prompted (a draft the composer opened to preview features, say) is only kept an
+ * hour: abandoned drafts must not hold a volume for two weeks. A prompt on it resets the lifetime.
+ */
+export const UNUSED_RETENTION_HOURS = 1;
 
 /** Label-safe, stable handle for a Paseo session id: finds the agent's sandbox again after a restart. */
 export const sessionLabel = (sessionId: string) => createHash("sha1").update(sessionId).digest("hex").slice(0, 16);
@@ -135,11 +140,11 @@ export function agentContainer(config: KubeAgentsConfig) {
   };
 }
 
-const days = (n: number) => new Date(Date.now() + n * 24 * 3600 * 1000).toISOString();
+const hours = (n: number) => new Date(Date.now() + n * 3600 * 1000).toISOString();
 
 /** Deletes the pod and keeps the volume; the Sandbox outlives its normal shutdown time so the agent can resume later. */
-export function suspendPatch() {
-  return { spec: { operatingMode: "Suspended", shutdownTime: days(SUSPENDED_RETENTION_DAYS) } };
+export function suspendPatch(used = true) {
+  return { spec: { operatingMode: "Suspended", shutdownTime: hours(used ? SUSPENDED_RETENTION_HOURS : UNUSED_RETENTION_HOURS) } };
 }
 
 /** Recreates the pod on the same volume, with the current image and settings and a fresh lifetime. */

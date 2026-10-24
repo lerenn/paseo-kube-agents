@@ -94,6 +94,8 @@ interface PodSession {
   turnId?: string;
   /** Running, suspended (pod deleted, volume kept) or coming back. */
   state: PodState;
+  /** True once the agent has been prompted (or has run a turn); drafts that were only opened have not. */
+  used: boolean;
   /** Last turn end, input or open; the idle timer counts from here. */
   lastActivity: number;
   /** Permission prompts shown to Paseo and not yet answered: the agent is waiting on a person, not idle. */
@@ -236,6 +238,7 @@ export async function connectKube(
     if (event.type === "session.turn" && event.sessionId === sessionId) {
       ps.turnId = event.state === "started" ? event.turnId : undefined;
       ps.lastActivity = now();
+      ps.used = true;
     }
     if (event.type === "session.permission_resolved" && event.sessionId === sessionId) {
       ps.pendingPermissions = Math.max(0, ps.pendingPermissions - 1);
@@ -307,7 +310,7 @@ export async function connectKube(
     ps.bridge?.close();
     await ps.inner.close().catch(() => undefined);
     try {
-      await kube.patchSandbox(ps.sandbox, suspendPatch());
+      await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used));
       notice(sessionId, "info", "Pod suspended after sitting idle. It comes back when you send a message; the workspace is kept.");
     } catch (error) {
       // Could not suspend: the agent process is gone, so bring it back rather than leave a half state.
@@ -335,7 +338,7 @@ export async function connectKube(
         // Back to suspended (and the pod released) so the next input retries from a clean state.
         ps.bridge?.close();
         await ps.inner?.close().catch(() => undefined);
-        await kube.patchSandbox(ps.sandbox, suspendPatch()).catch(() => undefined);
+        await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used)).catch(() => undefined);
         track(sessionId, ps, "suspended");
         const message = (error as Error).message;
         notice(sessionId, "error", `Could not resume the pod: ${message}`);
@@ -440,6 +443,7 @@ export async function connectKube(
       inner: undefined as unknown as ProviderConnection,
       stopForwarding: () => undefined,
       state: "running",
+      used: Boolean(input.persistence),
       lastActivity: now(),
       pendingPermissions: 0,
       opened: false,
@@ -545,6 +549,7 @@ export async function connectKube(
             return;
           }
           session.lastActivity = now();
+          if (input.type === "session.prompt") session.used = true;
           await resume(input.sessionId, session); // a no-op while running; inputs during a resume queue behind it
           await session.inner.send(input);
         }
@@ -562,14 +567,14 @@ export async function connectKube(
       // (volume kept) and the next session.open finds them again; an ephemeral workspace has nothing to keep.
       await Promise.allSettled(
         [...sessions.entries()].map(async ([sessionId, ps]) => {
-          if (!persistent) return release(sessionId);
+          if (!persistent || !ps.used) return release(sessionId);
           sessions.delete(sessionId);
           deps.registry?.delete(sessionId);
           ps.closing = true;
           ps.stopForwarding();
           ps.bridge?.close();
           await ps.inner?.close().catch(() => undefined);
-          if (ps.state !== "suspended") await kube.patchSandbox(ps.sandbox, suspendPatch());
+          if (ps.state !== "suspended") await kube.patchSandbox(ps.sandbox, suspendPatch(ps.used));
         }),
       );
       listeners.clear();
