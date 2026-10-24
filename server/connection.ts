@@ -645,6 +645,7 @@ export async function connectKube(
     capabilities,
     async send(input) {
       if (closed) throw new Error("kube-agents connection is closed");
+      if (process.env.PASEO_KUBE_DEBUG) console.log(`[kube-agents] input ${input.type} session=${"sessionId" in input ? String(input.sessionId).slice(0, 8) : "-"} known=${[...sessions.keys()].map((k) => k.slice(0, 8)).join(",")}`);
       switch (input.type) {
         case "catalog":
           emit({ type: "catalog", requestId: input.requestId, catalog: await catalog() });
