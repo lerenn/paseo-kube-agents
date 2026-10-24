@@ -1,8 +1,8 @@
 {
-  "id": "kube-agents",
-  "name": "Kube Agents",
-  "description": "Run each Paseo agent in its own Kubernetes pod.",
+  "id": "kubernetes-runtime",
+  "name": "Kubernetes Runtime",
+  "description": "Run Paseo workspaces, with real Claude and Codex agents, in Kubernetes pods.",
   "requirements": {
-    "paseo": ">=0.11.2"
+    "paseo": ">=0.13.0-beta.2"
   }
 }

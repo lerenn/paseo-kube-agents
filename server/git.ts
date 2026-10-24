@@ -5,22 +5,25 @@ export interface GitResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** Raw stdout, only with the `binary` option (for pack data). */
+  stdoutBuffer?: Buffer;
 }
 
 /** Runs git on the daemon with the daemon's own credentials, never prompting. */
-export type GitRunner = (args: string[], options?: { cwd?: string; input?: Buffer }) => Promise<GitResult>;
+export type GitRunner = (args: string[], options?: { cwd?: string; input?: Buffer; binary?: boolean }) => Promise<GitResult>;
 
 const GIT_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
 
-export const runGit: GitRunner = (args, { cwd, input } = {}) =>
+export const runGit: GitRunner = (args, { cwd, input, binary } = {}) =>
   new Promise((resolve, reject) => {
     const child = spawn("git", args, { cwd, env: GIT_ENV, stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
+    const chunks: Buffer[] = [];
     let stderr = "";
-    child.stdout.on("data", (d) => (stdout += d));
+    child.stdout.on("data", (d: Buffer) => (binary ? chunks.push(d) : (stdout += d)));
     child.stderr.on("data", (d) => (stderr += d));
     child.on("error", reject);
-    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+    child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr, ...(binary ? { stdoutBuffer: Buffer.concat(chunks) } : {}) }));
     child.stdin.on("error", () => undefined);
     child.stdin.end(input);
   });

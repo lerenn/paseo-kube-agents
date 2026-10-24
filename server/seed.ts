@@ -27,9 +27,24 @@ const resolveRef = async (git: GitRunner, cwd: string, candidates: string[]): Pr
   return null;
 };
 
+const isAncestor = async (git: GitRunner, cwd: string, a: string, b: string) =>
+  (await git(["merge-base", "--is-ancestor", a, b], { cwd })).code === 0;
+
 /**
- * Picks the commit the pod starts from, in the daemon's checkout: the picked branch (fetching it
- * first when the daemon's copy may be stale), a pull request's head, or the checkout's own HEAD.
+ * A branch as fresh as the remote knows it: the remote tip when the local branch is behind it, the local tip
+ * when it has commits the remote lacks (unpushed work, or diverged), so nothing is lost and nothing is stale.
+ */
+async function freshest(git: GitRunner, cwd: string, branch: string): Promise<string | null> {
+  await git(["fetch", "origin", branch], { cwd }); // best effort: offline or a local-only branch keeps the local tip
+  const local = await resolveRef(git, cwd, [`refs/heads/${branch}`]);
+  const remote = await resolveRef(git, cwd, [`refs/remotes/origin/${branch}`]);
+  if (!local || !remote || local === remote) return local ?? remote;
+  return (await isAncestor(git, cwd, local, remote)) ? remote : local;
+}
+
+/**
+ * Picks the commit the pod starts from, in the daemon's checkout, after fetching it fresh from origin: the base
+ * branch of a branch-off, the checked-out branch, a pull request's head, or the checkout's own branch.
  */
 export async function createSeed(
   git: GitRunner,
@@ -47,11 +62,16 @@ export async function createSeed(
     branch = `pr-${plan.pullRequest}`;
   } else if (plan?.branch) {
     branch = plan.branch;
-    await git(["fetch", "origin", branch], { cwd }); // best effort: the daemon's copy may be fresh already
-    sha = await resolveRef(git, cwd, [`refs/remotes/origin/${branch}`, `refs/heads/${branch}`]);
+    if (plan.action === "branch-off") {
+      // a new branch starts from the remote's base, not from whatever the daemon's copy of it had
+      await git(["fetch", "origin", branch], { cwd });
+      sha = await resolveRef(git, cwd, [`refs/remotes/origin/${branch}`, `refs/heads/${branch}`]);
+    } else {
+      sha = await freshest(git, cwd, branch);
+    }
   } else {
     branch = currentBranch;
-    sha = await resolveRef(git, cwd, ["HEAD"]);
+    sha = (await freshest(git, cwd, branch)) ?? (await resolveRef(git, cwd, ["HEAD"]));
   }
   if (!sha) throw new Error(`Branch ${branch} was not found in ${cwd} or on origin`);
   await need(git, cwd, ["update-ref", ref, sha], "pinning the seed commit");

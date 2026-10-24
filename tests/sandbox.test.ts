@@ -7,20 +7,20 @@ describe("sandbox manifest", () => {
   const config = ConfigSchema.parse({ image: "go:1", nodeSelector: { pool: "burst" } });
 
   it("builds a Sandbox in the configured namespace with the configured image", () => {
-    const sb = buildSandbox({ name: "pka-x", sessionId: "s1", config }) as any;
+    const sb = buildSandbox({ name: "pka-x", workspaceId: "wks_1", cwd: "/home/me/repo", config }) as any;
     expect(sb.kind).toBe("Sandbox");
     expect(sb.apiVersion).toBe("agents.x-k8s.io/v1beta1");
     expect(sb.metadata.namespace).toBe("paseo-agents");
     expect(sb.spec.podTemplate.spec.containers[0].image).toBe("go:1");
     expect(sb.spec.podTemplate.spec.nodeSelector).toEqual({ pool: "burst" });
-    // v1beta1 has flat shutdown fields; there is no spec.lifecycle
+    // v1beta1 has flat shutdown fields; there is no spec.lifecycle. A workspace's storage never expires.
     expect(sb.spec.lifecycle).toBeUndefined();
     expect(sb.spec.shutdownPolicy).toBe("Delete");
-    expect(Date.parse(sb.spec.shutdownTime)).toBeGreaterThan(Date.now());
+    expect(sb.spec.shutdownTime).toBeUndefined();
   });
 
   it("injects only the Claude token, by reference to the Secret, never inline and never the whole Secret", () => {
-    const sb = buildSandbox({ name: "n", sessionId: "s", config }) as any;
+    const sb = buildSandbox({ name: "n", workspaceId: "wks_1", cwd: "/home/me/repo", config }) as any;
     const c = sb.spec.podTemplate.spec.containers[0];
     expect(c.envFrom).toBeUndefined();
     expect(c.env).toEqual([
@@ -35,18 +35,18 @@ describe("sandbox manifest", () => {
       nodeSelector: { "lab.anyshift.io/pool": "burst" },
       tolerationKeys: ["lab.anyshift.io/burst"],
     });
-    const spec = (buildSandbox({ name: "n", sessionId: "s", config: c }) as any).spec.podTemplate.spec;
+    const spec = (buildSandbox({ name: "n", workspaceId: "wks_1", cwd: "/home/me/repo", config: c }) as any).spec.podTemplate.spec;
     expect(spec.nodeSelector).toEqual({ "lab.anyshift.io/pool": "burst" });
     expect(spec.tolerations).toEqual([{ key: "lab.anyshift.io/burst", operator: "Exists" }]);
   });
 
   it("passes resources through when set", () => {
     const c = ConfigSchema.parse({ resources: { requests: { cpu: "1" } } });
-    expect((buildSandbox({ name: "n", sessionId: "s", config: c }) as any).spec.podTemplate.spec.containers[0].resources).toEqual({ requests: { cpu: "1" } });
+    expect((buildSandbox({ name: "n", workspaceId: "wks_1", cwd: "/home/me/repo", config: c }) as any).spec.podTemplate.spec.containers[0].resources).toEqual({ requests: { cpu: "1" } });
   });
 
   it("makes DNS-safe names", () => {
-    expect(sandboxName("Sess_ID/With Weird!")).toMatch(/^pka-sess-id-with-weird-[0-9a-f]{6}$/);
+    expect(sandboxName("Wks_ID/With Weird!")).toMatch(/^pka-wks-id-with-weird-[0-9a-f]{6}$/);
   });
 });
 

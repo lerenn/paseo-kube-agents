@@ -1,9 +1,9 @@
 import type { PluginClientContext, PluginSidebarItemProps } from "@getpaseo/plugin/client";
 import { SidebarRow } from "@getpaseo/plugin/client/ui";
-import { KubeAgentsScreen } from "./client/screen.js";
+import { KubernetesRuntimeScreen } from "./client/screen.js";
 import { contributePodLocation } from "./client/pod-location.js";
 
-function KubeAgentsItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
+function KubernetesRuntimeItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
   return (
     <SidebarRow
       icon="Container"
@@ -16,8 +16,8 @@ function KubeAgentsItem({ currentScreen, openScreen }: PluginSidebarItemProps) {
 export default function contribute(client: PluginClientContext) {
   const removers = [
     contributePodLocation(client),
-    client.addScreen({ id: "settings", title: "Kube Agents", Component: KubeAgentsScreen }),
-    client.addSidebarHeaderItem({ id: "kube-agents", title: "Kube Agents", Component: KubeAgentsItem }),
+    client.addScreen({ id: "settings", title: "Kubernetes Runtime", Component: KubernetesRuntimeScreen }),
+    client.addSidebarHeaderItem({ id: "kubernetes-runtime", title: "Kubernetes Runtime", Component: KubernetesRuntimeItem }),
   ];
   return () => removers.forEach((remove) => remove());
 }

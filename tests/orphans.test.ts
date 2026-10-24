@@ -1,75 +1,100 @@
 import { describe, expect, it } from "vitest";
-import { OrphanReaper, paseoAgentState, type AgentState } from "../server/orphans.js";
-import { buildSandbox, claimPatch, resumePatch, suspendPatch, usedPatch } from "../server/sandbox.js";
+import { OrphanReaper, paseoAgentState, paseoWorkspaceIds, type AgentState } from "../server/orphans.js";
+import { buildSandbox, labelValue } from "../server/sandbox.js";
 import { readDaemonId } from "../server/daemon.js";
-import { connectKube } from "../server/connection.js";
 import { ConfigSchema } from "../shared/settings.js";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FakeAcp, FakeKube, fakeSeeder } from "./fakes.js";
+import { FakeKube } from "./fakes.js";
 
 const MIN = 60_000;
 const NOW = Date.parse("2026-10-24T12:00:00Z");
 const old = new Date(NOW - 60 * MIN).toISOString();
 const fresh = new Date(NOW - 1 * MIN).toISOString();
-const sandbox = (name: string, labels: Record<string, string>, createdAt = old) => ({ name, labels, annotations: {}, operatingMode: "Running" as const, createdAt });
+const sandbox = (name: string, labels: Record<string, string>, createdAt = old) => ({ name, labels: { "app.kubernetes.io/managed-by": "paseo-kube-agents", ...labels }, annotations: {}, operatingMode: "Running" as const, createdAt });
+const mine = { "paseo.sh/daemon": "srv_ME" };
 
-function setup(states: Record<string, AgentState>, daemonId: string | null = "srv_ME") {
+function setup(workspaces: string[] | null, opts: { agents?: Record<string, AgentState>; daemonId?: string | null; sweep?: boolean; active?: string[] } = {}) {
   const kube = new FakeKube();
   const logs: string[] = [];
   const asked: string[] = [];
   const reaper = new OrphanReaper({
-    getConfig: async () => ConfigSchema.parse({}),
+    getConfig: async () => ConfigSchema.parse({ sweepUnlabelled: opts.sweep ?? true }),
     kubeFor: () => kube,
-    daemonId: daemonId ?? undefined,
-    agentState: async (id) => (asked.push(id), states[id] ?? "unknown"),
+    daemonId: opts.daemonId === null ? undefined : (opts.daemonId ?? "srv_ME"),
+    workspaceIds: async () => (workspaces ? new Set(workspaces) : null),
+    agentState: async (id) => (asked.push(id), opts.agents?.[id] ?? "unknown"),
+    activeSandboxes: () => new Set(opts.active ?? []),
     now: () => NOW,
     log: (l) => logs.push(l),
   });
   return { kube, logs, asked, reaper };
 }
 
-describe("orphan reaper", () => {
-  it("deletes sandboxes (and claims) whose agent is gone or archived, and logs each deletion", async () => {
-    const { kube, logs, reaper } = setup({ a1: "gone", a2: "alive" });
-    kube.sandboxes = [sandbox("sb-gone", { "paseo.sh/daemon": "srv_ME", "paseo.sh/agent": "a1" }), sandbox("sb-alive", { "paseo.sh/daemon": "srv_ME", "paseo.sh/agent": "a2" })];
+describe("orphan reaper: workspaces", () => {
+  it("goes by the workspace-id label, whatever the display label says, and reports names after each run", async () => {
+    const kube = new FakeKube();
+    let told: Map<string, string> | undefined;
+    const reaper = new OrphanReaper({
+      getConfig: async () => ConfigSchema.parse({}),
+      kubeFor: () => kube,
+      daemonId: "srv_ME",
+      workspaces: async () => new Map([["wks_alive", "Renamed"]]),
+      onNames: async (names) => void (told = names),
+      now: () => NOW,
+      log: () => undefined,
+    });
+    kube.sandboxes = [
+      sandbox("sb-gone", { ...mine, "paseo.sh/workspace-id": "wks_gone", "paseo.sh/workspace": "Old-Name" }),
+      sandbox("sb-alive", { ...mine, "paseo.sh/workspace-id": "wks_alive", "paseo.sh/workspace": "Old-Name" }),
+    ];
+    await reaper.run();
+    expect(kube.calls.filter((c) => c.startsWith("delete:sandbox"))).toEqual(["delete:sandbox/sb-gone"]);
+    expect(told?.get("wks_alive")).toBe("Renamed");
+  });
+
+  it("deletes the sandbox and claim of a workspace Paseo no longer has, and logs it", async () => {
+    const { kube, logs, reaper } = setup(["wks_alive"]);
+    kube.sandboxes = [sandbox("sb-gone", { ...mine, "paseo.sh/workspace": "wks_gone" }), sandbox("sb-alive", { ...mine, "paseo.sh/workspace": "wks_alive" })];
     const status = await reaper.run();
     expect(kube.calls.filter((c) => c.startsWith("delete:"))).toEqual(["delete:sandbox/sb-gone", "delete:pvc/workspace-sb-gone"]);
-    expect(logs).toEqual([expect.stringContaining("deleting sandbox sb-gone (agent a1 is gone or archived)")]);
+    expect(logs).toEqual([expect.stringContaining("deleting sandbox sb-gone (workspace wks_gone is gone or archived)")]);
     expect(status).toMatchObject({ removed: 1, removedTotal: 1, lastRunAt: new Date(NOW).toISOString() });
   });
 
-  it("leaves alone: unknown agent state, young resources, other daemons' resources, and resources without an agent label", async () => {
-    const { kube, asked, reaper } = setup({ a1: "unknown", a2: "gone", a3: "gone" });
+  it("deletes nothing when the workspace list could not be read (unknown is not gone)", async () => {
+    const { kube, reaper } = setup(null);
+    kube.sandboxes = [sandbox("sb", { ...mine, "paseo.sh/workspace": "wks_x" })];
+    await reaper.run();
+    expect(kube.calls.filter((c) => c.startsWith("delete:"))).toEqual([]);
+  });
+
+  it("leaves alone young resources, other daemons' resources and unlabelled-for-workspace ones", async () => {
+    const { kube, reaper } = setup(["wks_other"]);
     kube.sandboxes = [
-      sandbox("unknown", { "paseo.sh/daemon": "srv_ME", "paseo.sh/agent": "a1" }), // Paseo could not be asked
-      sandbox("young", { "paseo.sh/daemon": "srv_ME", "paseo.sh/agent": "a2" }, fresh), // within the grace period
-      sandbox("other-daemon", { "paseo.sh/daemon": "srv_OTHER", "paseo.sh/agent": "a3" }),
-      sandbox("draft", { "paseo.sh/daemon": "srv_ME" }), // no agent: a draft, handled by its one-hour expiry
+      sandbox("young", { ...mine, "paseo.sh/workspace": "wks_young" }, fresh), // within the grace period
+      sandbox("other-daemon", { "paseo.sh/daemon": "srv_OTHER", "paseo.sh/workspace": "wks_gone" }),
+      sandbox("no-workspace", { ...mine }),
     ];
     await reaper.run();
     expect(kube.calls.filter((c) => c.startsWith("delete:"))).toEqual([]);
-    expect(asked).toEqual(["a1"]); // never even asked about the other daemon's agent or the young one
   });
 
-  it("reports unlabelled plugin sandboxes without deleting them", async () => {
-    const { kube, logs, reaper } = setup({});
-    kube.sandboxes = [sandbox("legacy", { "app.kubernetes.io/managed-by": "paseo-kube-agents" })];
-    const status = await reaper.run();
-    expect(status.unlabelled).toEqual(["legacy"]);
-    expect(logs[0]).toContain("without a daemon label are left alone: legacy");
-    expect(kube.calls.filter((c) => c.startsWith("delete:"))).toEqual([]);
+  it("still cleans up sandboxes of the earlier provider-based design by their agent label", async () => {
+    const { kube, asked, reaper } = setup(["wks_x"], { agents: { a1: "gone", a2: "alive", a3: "unknown" } });
+    kube.sandboxes = [sandbox("legacy-gone", { ...mine, "paseo.sh/agent": "a1" }), sandbox("legacy-alive", { ...mine, "paseo.sh/agent": "a2" }), sandbox("legacy-unknown", { ...mine, "paseo.sh/agent": "a3" })];
     await reaper.run();
-    expect(logs).toHaveLength(1); // told once, not every ten minutes
+    expect(kube.calls.filter((c) => c.startsWith("delete:sandbox/"))).toEqual(["delete:sandbox/legacy-gone"]);
+    expect(asked.sort()).toEqual(["a1", "a2", "a3"]);
   });
 
   it("deletes a volume claim whose sandbox is gone, but not one whose sandbox exists", async () => {
-    const { kube, reaper } = setup({});
-    kube.sandboxes = [sandbox("sb-1", { "paseo.sh/daemon": "srv_ME" })];
+    const { kube, reaper } = setup(["wks_a"]);
+    kube.sandboxes = [sandbox("sb-1", { ...mine, "paseo.sh/workspace": "wks_a" })];
     kube.claims = [
-      { name: "workspace-sb-1", labels: { "paseo.sh/daemon": "srv_ME" }, createdAt: old },
-      { name: "workspace-sb-dead", labels: { "paseo.sh/daemon": "srv_ME" }, createdAt: old },
+      { name: "workspace-sb-1", labels: mine, createdAt: old },
+      { name: "workspace-sb-dead", labels: mine, createdAt: old },
       { name: "workspace-other", labels: { "paseo.sh/daemon": "srv_OTHER" }, createdAt: old },
     ];
     await reaper.run();
@@ -77,15 +102,14 @@ describe("orphan reaper", () => {
   });
 
   it("does nothing, and says so, without a daemon id", async () => {
-    const { kube, reaper } = setup({ a1: "gone" }, null);
-    kube.sandboxes = [sandbox("sb", { "paseo.sh/daemon": "srv_ME", "paseo.sh/agent": "a1" })];
-    const status = await reaper.run();
-    expect(status.error).toMatch(/daemon id unknown/);
+    const { kube, reaper } = setup(["wks_x"], { daemonId: null });
+    kube.sandboxes = [sandbox("sb", { ...mine, "paseo.sh/workspace": "wks_gone" })];
+    expect((await reaper.run()).error).toMatch(/daemon id unknown/);
     expect(kube.calls).toEqual([]);
   });
 
   it("keeps its previous result and reports the error when the cluster cannot be read", async () => {
-    const { kube, reaper } = setup({});
+    const { kube, reaper } = setup(["wks_x"]);
     kube.listSandboxes = async () => {
       throw new Error("api down");
     };
@@ -95,44 +119,78 @@ describe("orphan reaper", () => {
   });
 
   it("runs once at a time", async () => {
-    const { kube, reaper } = setup({});
+    const { kube, reaper } = setup(["wks_x"]);
     let calls = 0;
     const original = kube.listSandboxes.bind(kube);
     kube.listSandboxes = async (s: string) => (calls++, original(s));
     await Promise.all([reaper.run(), reaper.run()]);
-    expect(calls).toBeLessThanOrEqual(3); // one pass (three lists), not two
+    expect(calls).toBeLessThanOrEqual(4); // one pass, not two
   });
 });
 
-describe("labels and expiry", () => {
+describe("orphan reaper: unlabelled leftovers", () => {
+  it("deletes old unlabelled pka- sandboxes and claims, logging each, but never what this plugin runs, young ones, or other names", async () => {
+    const { kube, logs, reaper } = setup(["wks_x"], { active: ["pka-running"] });
+    kube.sandboxes = [sandbox("pka-draft", {}), sandbox("pka-young", {}, fresh), sandbox("pka-running", {}), sandbox("not-ours", {}), sandbox("pka-other-daemon", { "paseo.sh/daemon": "srv_OTHER" })];
+    kube.claims = [{ name: "workspace-pka-gone", labels: {}, createdAt: old }, { name: "workspace-unrelated", labels: {}, createdAt: old }];
+    const status = await reaper.run();
+    expect(kube.calls.filter((c) => c.startsWith("delete:sandbox/"))).toEqual(["delete:sandbox/pka-draft"]);
+    expect(kube.calls).toContain("delete:pvc/workspace-pka-gone");
+    expect(kube.calls).not.toContain("delete:pvc/workspace-unrelated");
+    expect(logs.filter((l) => l.includes("deleting unlabelled sandbox"))).toHaveLength(1);
+    expect(status.removed).toBe(2); // one sandbox and one claim without a sandbox
+  });
+
+  it("is off when the setting is off: it reports them and deletes nothing", async () => {
+    const { kube, logs, reaper } = setup(["wks_x"], { sweep: false });
+    kube.sandboxes = [sandbox("pka-draft", {})];
+    const status = await reaper.run();
+    expect(status.unlabelled).toEqual(["pka-draft"]);
+    expect(logs[0]).toContain("left alone: pka-draft");
+    expect(kube.calls.filter((c) => c.startsWith("delete:"))).toEqual([]);
+    await reaper.run();
+    expect(logs).toHaveLength(1); // told once, not every ten minutes
+  });
+});
+
+describe("workspaces Paseo has", () => {
+  const out = (list: unknown[]) => async (_f: string, args: string[]) => ({ stdout: JSON.stringify(args.includes("--background") ? [] : list) });
+  it("lists active and background workspaces", async () => {
+    const calls: string[][] = [];
+    const ids = await paseoWorkspaceIds(async (_f, args) => (calls.push(args), { stdout: JSON.stringify(args.includes("--background") ? [{ workspaceId: "wks_bg" }] : [{ workspaceId: "wks_a" }]) }));
+    expect(ids).toEqual(new Set(["wks_a", "wks_bg"]));
+    expect(calls).toHaveLength(2);
+  });
+  it("is null, never empty, when it cannot be trusted: nothing listed, garbage, or a failure", async () => {
+    expect(await paseoWorkspaceIds(out([]))).toBeNull();
+    expect(await paseoWorkspaceIds(async () => ({ stdout: "nope" }))).toBeNull();
+    expect(await paseoWorkspaceIds(async () => { throw new Error("daemon down"); })).toBeNull();
+  });
+});
+
+describe("labels", () => {
   const config = ConfigSchema.parse({});
-  it("labels the sandbox and its volume claim with the daemon and the agent", () => {
-    const sb = buildSandbox({ name: "n", sessionId: "s", config, daemonId: "srv_ME", agentId: "agent-1" }) as any;
-    expect(sb.metadata.labels).toMatchObject({ "paseo.sh/daemon": "srv_ME", "paseo.sh/agent": "agent-1" });
-    expect(sb.spec.volumeClaimTemplates[0].metadata.labels).toEqual({ "paseo.sh/daemon": "srv_ME", "paseo.sh/agent": "agent-1" });
+  it("labels the sandbox and its volume claim with the daemon and the workspace", () => {
+    const sb = buildSandbox({ name: "n", workspaceId: "wks_1", cwd: "/p", config, daemonId: "srv_ME" }) as any;
+    expect(sb.metadata.labels).toMatchObject({ "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace-id": "wks_1" });
+    expect(sb.spec.volumeClaimTemplates[0].metadata.labels).toEqual({ "paseo.sh/daemon": "srv_ME", "paseo.sh/workspace-id": "wks_1" });
     expect(sb.spec.podTemplate.metadata.labels).not.toHaveProperty("paseo.sh/daemon"); // the pod only carries the NetworkPolicy label
   });
 
-  it("warm pool sandboxes carry the daemon but no agent, until claimed", () => {
-    const sb = buildSandbox({ name: "n", sessionId: "", config, pool: true, daemonId: "srv_ME" }) as any;
-    expect(sb.metadata.labels["paseo.sh/daemon"]).toBe("srv_ME");
-    expect(sb.metadata.labels["paseo.sh/agent"]).toBeUndefined();
-    expect(claimPatch("s", config, "agent-9").metadata.labels["paseo.sh/agent"]).toBe("agent-9");
-  });
-
-  it("an agent in use has no expiry in any state; a draft gets finite ones", () => {
-    expect(suspendPatch(true).spec.shutdownTime).toBeNull();
-    expect(resumePatch(config, true).spec.shutdownTime).toBeNull();
-    expect(usedPatch().spec.shutdownTime).toBeNull();
-    expect(Date.parse(suspendPatch(false).spec.shutdownTime as string) - Date.now()).toBeLessThan(2 * 3600 * 1000);
-    expect(Date.parse(resumePatch(config, false).spec.shutdownTime as string) - Date.now()).toBeGreaterThan(7 * 3600 * 1000);
-  });
-
-  it("the connection labels a new sandbox with the daemon id and the agent id from the session env", async () => {
-    const kube = new FakeKube();
-    const conn = await connectKube({ versions: [1], capabilities: [] }, { config, kube, acpProvider: new FakeAcp().provider, detectRepo: async () => ({ url: "https://github.com/x/y", branch: "main" }), seeder: fakeSeeder, eager: true, sleep: async () => undefined, now: () => 1, daemonId: "srv_ME" });
-    await conn.send({ type: "session.open", requestId: "r", sessionId: "s1", config: { cwd: "/x", env: { PASEO_KUBE_AGENT_ID: "agent-77" }, mcpServers: {}, settings: {}, persist: false }, history: "skip" });
-    expect((kube.applied[0] as any).metadata.labels).toMatchObject({ "paseo.sh/daemon": "srv_ME", "paseo.sh/agent": "agent-77" });
+  it("labels the sandbox, pod and claim with the workspace name, agent, repo and state for people", () => {
+    const meta = { workspaceName: "My Repo: fix the login (v2)!", repo: "my-repo", repoUrl: "https://user:tok@github.com/o/my-repo.git", agent: "0c0f7a18", state: "running" as const };
+    const sb = buildSandbox({ name: "pka-n", workspaceId: "wks_1", cwd: "/p", config, daemonId: "srv_ME", meta }) as any;
+    const shown = { "paseo.sh/workspace": "My-Repo-fix-the-login-v2", "paseo.sh/agent": "0c0f7a18", "paseo.sh/repo": "my-repo", "paseo.sh/state": "running" };
+    expect(sb.metadata.labels).toMatchObject(shown);
+    expect(sb.spec.podTemplate.metadata.labels).toMatchObject(shown);
+    expect(sb.spec.volumeClaimTemplates[0].metadata.labels).toMatchObject(shown);
+    expect(sb.metadata.annotations["paseo.sh/workspace-name"]).toBe("My Repo: fix the login (v2)!"); // the full name lives in an annotation
+    expect(sb.metadata.annotations["paseo.sh/repo-url"]).toBe("https://github.com/o/my-repo.git"); // credentials never end up on the object
+    expect(sb.metadata.name).not.toContain("warm");
+    const long = (buildSandbox({ name: "n", workspaceId: "w", cwd: "/p", config, meta: { ...meta, workspaceName: "x".repeat(200) + "-" } }) as any).metadata.labels["paseo.sh/workspace"];
+    expect(long).toHaveLength(63);
+    expect(labelValue("--")).toBeUndefined();
+    expect(labelValue("a b")).toBe("a-b");
   });
 
   it("reads the daemon id from Paseo's home", () => {

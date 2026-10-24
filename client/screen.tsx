@@ -12,7 +12,7 @@ import {
 import { useCallback, useEffect, useState } from "react";
 import { Linking, Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { CREDENTIAL_KEYS, type CredentialKey, credentialsRemove, credentialsSet, credentialsStatus } from "../shared/credentials.js";
-import { type KubeAgentsConfig, kubeSettings } from "../shared/settings.js";
+import { type KubernetesRuntimeConfig, kubeSettings } from "../shared/settings.js";
 import { kubeStatus } from "../shared/status.js";
 
 /** Optional host components; older apps may not provide them, so never render an undefined element. */
@@ -223,7 +223,7 @@ function reaperLine(r: { lastRunAt?: string; removed: number; error?: string; un
   return `Last reconcile: ${r.removed} orphan${r.removed === 1 ? "" : "s"} removed (${ago(r.lastRunAt)})${unlabelled}${r.error ? `; failed: ${r.error}` : ""}`;
 }
 
-/** Warm pool state and the pod agents this plugin runs (running or suspended). Refreshes while visible. */
+/** The workspaces this plugin runs pods for (running or suspended) and the last orphan cleanup. Refreshes while visible. */
 function StatusSection({ theme }: { theme: PluginScreenProps["theme"] }) {
   const load = useRpc(kubeStatus);
   const [status, setStatus] = useState<Awaited<ReturnType<typeof load>> | null>(null);
@@ -249,22 +249,13 @@ function StatusSection({ theme }: { theme: PluginScreenProps["theme"] }) {
       {text}
     </Text>
   );
-  const pool = status?.pool;
-  const poolLine = !pool
-    ? "Loading..."
-    : pool.state === "off"
-      ? "Warm pool: off"
-      : pool.state === "asleep"
-        ? `Warm pool: asleep since ${ago(pool.asleepSince ?? new Date().toISOString())} (the next pod agent wakes it)`
-        : `Warm pool: active, ${pool.ready}/${pool.size} ready${pool.starting ? `, ${pool.starting} starting` : ""}`;
   return (
     <SettingsSection title="Status">
       <SettingsCard>
         <View style={{ paddingHorizontal: 14, paddingVertical: 12, gap: 4 }}>
-          {line(poolLine)}
           {status ? line(reaperLine(status.reaper), true) : null}
           {(status?.pods ?? []).map((p) => line(`${p.sandbox}: ${p.state} since ${ago(p.since)}`, true))}
-          {status && status.pods.length === 0 ? line("No pod agents running.", true) : null}
+          {status && status.pods.length === 0 ? line("No workspaces running.", true) : null}
           {error ? line(`Status unavailable: ${error}`, true) : null}
         </View>
       </SettingsCard>
@@ -341,9 +332,9 @@ function CredentialsSection({ theme }: { theme: PluginScreenProps["theme"] }) {
   );
 }
 
-export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
+export function KubernetesRuntimeScreen({ theme, layout }: PluginScreenProps) {
   const settings = useSettings(kubeSettings);
-  const [draft, setDraft] = useState<KubeAgentsConfig | null>(null);
+  const [draft, setDraft] = useState<KubernetesRuntimeConfig | null>(null);
   const [revision, setRevision] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
 
@@ -369,7 +360,7 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
   const dirty = JSON.stringify(draft) !== JSON.stringify(settings.values);
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.colors.surface0 }} contentContainerStyle={{ padding: pad, gap: 16 }}>
-      <Text style={{ color: theme.colors.foregroundMuted }}>Runs each agent that picks this provider in its own pod.</Text>
+      <Text style={{ color: theme.colors.foregroundMuted }}>Runs the workspaces you start with the Pod location in their own pods.</Text>
 
       <SettingsSection title="Cluster">
         <SettingsCard>
@@ -422,8 +413,8 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
                 </>
               ) : null}
               <SettingsInput
-                label="Suspend idle pods after (minutes)"
-                hint="Deletes an idle agent's pod and keeps its workspace; any message resumes it. 0 = never."
+                label="Suspend idle workspaces after (minutes)"
+                hint="Deletes the pod of a workspace whose agents are all idle and keeps its files; the next message resumes it. 0 = never."
                 initialValue={String(draft.podIdleMinutes)}
                 onChangeText={(t) => {
                   const n = Number.parseInt(t, 10);
@@ -435,42 +426,6 @@ export function KubeAgentsScreen({ theme, layout }: PluginScreenProps) {
                 hint="Also delete this plugin's old sandboxes that match no agent. Turn off if daemons share a namespace."
                 value={draft.sweepUnlabelled}
                 onValueChange={(sweepUnlabelled) => setDraft({ ...draft, sweepUnlabelled })}
-              />
-              <SettingsSwitch
-                label="Warm pool"
-                hint="Keep pre-started pods ready for new agents."
-                value={draft.warmPool.enabled}
-                onValueChange={(enabled) => setDraft({ ...draft, warmPool: { ...draft.warmPool, enabled } })}
-              />
-              {draft.warmPool.enabled ? (
-                <>
-                  <SettingsInput
-                    label="Warm pool size"
-                    initialValue={String(draft.warmPool.size)}
-                    onChangeText={(t) => {
-                      const n = Number.parseInt(t, 10);
-                      if (Number.isFinite(n) && n >= 0 && n <= 10) setDraft({ ...draft, warmPool: { ...draft.warmPool, size: n } });
-                    }}
-                  />
-                  <SettingsInput
-                    label="Warm pool sleeps after (minutes)"
-                    hint="No pod agent requested for this long: the pool scales to 0."
-                    initialValue={String(draft.warmPool.idleMinutes)}
-                    onChangeText={(t) => {
-                      const n = Number.parseInt(t, 10);
-                      if (Number.isFinite(n) && n >= 1) setDraft({ ...draft, warmPool: { ...draft.warmPool, idleMinutes: n } });
-                    }}
-                  />
-                </>
-              ) : null}
-              <SettingsInput
-                label="Agent command"
-                hint="ACP agent started in the pod."
-                initialValue={draft.agentCommand.join(" ")}
-                onChangeText={(t) => {
-                  const parts = t.split(/\s+/).filter(Boolean);
-                  if (parts.length > 0) setDraft({ ...draft, agentCommand: parts });
-                }}
               />
             </>
           ) : null}

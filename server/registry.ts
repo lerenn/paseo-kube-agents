@@ -1,7 +1,7 @@
 export type PodState = "running" | "suspended" | "resuming";
 
 export interface PodEntry {
-  sessionId: string;
+  workspaceId: string;
   sandbox: string;
   state: PodState;
   /** When the pod entered this state (ms since epoch). */
@@ -12,13 +12,13 @@ export interface PodEntry {
 export class PodRegistry {
   private readonly entries = new Map<string, PodEntry>();
 
-  set(sessionId: string, sandbox: string, state: PodState, now = Date.now()): void {
-    const current = this.entries.get(sessionId);
-    this.entries.set(sessionId, { sessionId, sandbox, state, since: current?.state === state ? current.since : now });
+  set(workspaceId: string, sandbox: string, state: PodState, now = Date.now()): void {
+    const current = this.entries.get(workspaceId);
+    this.entries.set(workspaceId, { workspaceId, sandbox, state, since: current?.state === state ? current.since : now });
   }
 
-  delete(sessionId: string): void {
-    this.entries.delete(sessionId);
+  delete(workspaceId: string): void {
+    this.entries.delete(workspaceId);
   }
 
   list(): PodEntry[] {

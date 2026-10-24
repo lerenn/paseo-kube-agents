@@ -6,7 +6,7 @@ describe("settings schema", () => {
     const c = ConfigSchema.parse({});
     expect(c.namespace).toBe("paseo-agents");
     expect(c.credentialsSecret).toBe("paseo-agent-credentials");
-    expect(c.image).toMatch(/paseo-kube-agents-default/);
+    expect(c.image).toMatch(/paseo-kubernetes-runtime-default/);
     expect(c).not.toHaveProperty("templates");
   });
 
@@ -47,13 +47,11 @@ describe("migrating v1 settings (templates) to the flat configuration", () => {
   it("keeps defaultImage and the global placement when the default template has none (Louis's setup)", () => {
     const c = migrate({
       defaultImage: "node:22-bookworm",
-      agentCommand: ["npx", "-y", "@agentclientprotocol/claude-agent-acp"],
       nodeSelector: { "lab.anyshift.io/pool": "burst" },
       tolerationKeys: ["lab.anyshift.io/burst"],
       templates: {},
     });
     expect(c.image).toBe("node:22-bookworm");
-    expect(c.agentCommand).toEqual(["npx", "-y", "@agentclientprotocol/claude-agent-acp"]);
     expect(c.nodeSelector).toEqual({ "lab.anyshift.io/pool": "burst" });
     expect(c.tolerationKeys).toEqual(["lab.anyshift.io/burst"]);
   });

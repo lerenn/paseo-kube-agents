@@ -5,10 +5,8 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { ProviderEvent } from "@getpaseo/plugin/server/provider";
 import { ConfigSchema } from "../shared/settings.js";
-import { connectKube } from "../server/connection.js";
-import { FakeAcp } from "./fakes.js";
+import { KubernetesRuntime } from "../server/runtime.js";
 import { LocalPodKube } from "./local-pod.js";
 
 const ID = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -23,7 +21,7 @@ const wait = (cond: () => boolean | Promise<boolean>, ms = 8000) =>
     reject(new Error("timed out"));
   });
 
-function repos() {
+function repos(withSubmodule = false) {
   const root = mkdtempSync(join(tmpdir(), "kube-sim-"));
   const origin = join(root, "origin.git");
   const project = join(root, "project");
@@ -34,7 +32,22 @@ function repos() {
   sh(project, "add", ".");
   sh(project, "commit", "-qm", "one");
   sh(project, "push", "-q", "origin", "main");
-  return { origin, project };
+  let sub = "";
+  if (withSubmodule) {
+    sub = join(root, "sub.git");
+    const subWork = join(root, "sub");
+    mkdirSync(sub);
+    sh(sub, "init", "-q", "--bare", "-b", "main");
+    sh(root, "clone", "-q", sub, subWork);
+    writeFileSync(join(subWork, "lib.txt"), "lib one\n");
+    sh(subWork, "add", ".");
+    sh(subWork, "commit", "-qm", "lib one");
+    sh(subWork, "push", "-q", "origin", "main");
+    sh(project, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "vendor/lib");
+    sh(project, "commit", "-qm", "add submodule");
+    sh(project, "push", "-q", "origin", "main");
+  }
+  return { origin, project, sub, root };
 }
 
 const cleanups: (() => void)[] = [];
@@ -42,35 +55,28 @@ afterEach(() => {
   while (cleanups.length) cleanups.pop()!();
 });
 
-async function openSession(env: Record<string, string> = {}, mcpServers: Record<string, any> = {}, tunnel?: { pod: number; daemon: number }) {
-  const { origin, project } = repos();
-  const kube = new LocalPodKube();
-  const acp = new FakeAcp();
-  const events: ProviderEvent[] = [];
-  const conn = await connectKube(
-    { versions: [1], capabilities: ["prompt.message"] },
-    {
-      config: ConfigSchema.parse({ readyTimeoutSeconds: 5 }),
-      kube,
-      acpProvider: acp.provider,
-      eager: true,
-      mapTunnelPort: tunnel ? (p) => (p === tunnel.pod ? tunnel.daemon : p) : undefined,
-    },
-  );
-  conn.onEvent((e) => events.push(e));
-  cleanups.push(() => kube.stop());
-  await conn.send({
-    type: "session.open",
-    requestId: "r",
-    sessionId: "s",
-    config: { cwd: project, env, mcpServers, settings: {}, persist: false },
-    history: "skip",
+async function openSession(argv0 = "sh", mcpServers: Record<string, any> = {}, tunnel?: { pod: number; daemon: number }, env: Record<string, string> = {}, withSubmodule = false) {
+  const { origin, project, sub, root } = repos(withSubmodule);
+  const kube = new LocalPodKube(project);
+  const runtime = new KubernetesRuntime({
+    getConfig: async () => ConfigSchema.parse({ readyTimeoutSeconds: 5 }),
+    kubeFor: () => kube,
+    daemonId: "srv_ME",
+    log: () => undefined,
+    mapTunnelPort: tunnel ? (p) => (p === tunnel.pod ? tunnel.daemon : p) : undefined,
+    ticker: () => () => undefined,
   });
-  const failed = events.find((e) => e.type === "request.failed") as any;
-  if (failed) throw new Error(failed.error.message);
-  const dir = (acp.inputs[0] as any).config.cwd as string;
-  const podDir = dir.replace("/workspace", kube.workspace);
-  return { origin, project, kube, podDir, conn, events };
+  cleanups.push(() => {
+    runtime.stop();
+    kube.stop();
+  });
+  const notices: string[] = [];
+  const ctx = { notice: (m: string) => void notices.push(m), signal: new AbortController().signal };
+  await runtime.registration().prepare!(
+    { workspaceId: "wks_1", options: { cwd: project, slug: "brave-otter-12", ref: null }, purpose: "session", argv: [argv0], env, mcpServers } as never,
+    ctx,
+  );
+  return { origin, project, sub, root, kube, podDir: kube.checkout, notices, runtime };
 }
 
 describe("seeded pod workspace and push-back (real git, real pod scripts)", () => {
@@ -137,6 +143,52 @@ describe("seeded pod workspace and push-back (real git, real pod scripts)", () =
   });
 });
 
+describe("fetching through the daemon (real git, real pod scripts)", () => {
+  it("git fetch and git pull get new commits from the remote with the daemon's credentials", async () => {
+    const { origin, kube, podDir } = await openSession();
+    const other = join(mkdtempSync(join(tmpdir(), "kube-other-")), "o");
+    sh(tmpdir(), "clone", "-q", origin, other);
+    writeFileSync(join(other, "new.txt"), "new\n");
+    sh(other, "add", ".");
+    sh(other, "commit", "-qm", "upstream work");
+    sh(other, "push", "-q", "origin", "main");
+    sh(other, "tag", "v9");
+    sh(other, "push", "-q", "origin", "v9");
+
+    const fetched = await kube.as(["git", "fetch", "origin"], { cwd: podDir });
+    expect(fetched.code, fetched.stderr).toBe(0);
+    expect(sh(podDir, "log", "-1", "--format=%s", "origin/main")).toBe("upstream work");
+    expect(sh(podDir, "tag", "--list", "v9")).toBe("v9");
+    expect((await kube.as(["git", "config", "--global", "--get-regexp", "insteadof"])).stdout).toContain("mirrors/");
+
+    // a second upstream commit arrives through pull, sending only what the pod lacks
+    writeFileSync(join(other, "more.txt"), "more\n");
+    sh(other, "add", ".");
+    sh(other, "commit", "-qm", "more upstream work");
+    sh(other, "push", "-q", "origin", "main");
+    const pulled = await kube.as(["git", "pull", "--ff-only", "origin", "main"], { cwd: podDir });
+    expect(pulled.code, pulled.stderr).toBe(0);
+    expect(sh(podDir, "log", "-1", "--format=%s")).toBe("more upstream work");
+  });
+
+  it("checks out the submodules of the seeded commit and updates them through the daemon", async () => {
+    const { sub, root, kube, podDir, notices } = await openSession("sh", {}, undefined, {}, true);
+    expect(notices.join("\n")).not.toMatch(/submodules/);
+    expect(sh(podDir, "submodule", "status")).toContain("vendor/lib");
+    expect(sh(join(podDir, "vendor/lib"), "log", "-1", "--format=%s")).toBe("lib one");
+
+    const subWork = join(root, "sub");
+    writeFileSync(join(subWork, "lib2.txt"), "lib two\n");
+    sh(subWork, "add", ".");
+    sh(subWork, "commit", "-qm", "lib two");
+    sh(subWork, "push", "-q", "origin", "main");
+    const updated = await kube.as(["git", "submodule", "update", "--remote", "vendor/lib"], { cwd: podDir });
+    expect(updated.code, updated.stderr).toBe(0);
+    expect(sh(join(podDir, "vendor/lib"), "log", "-1", "--format=%s")).toBe("lib two");
+    expect(sub).toBeTruthy();
+  });
+});
+
 describe("loopback tunnel to the daemon's MCP servers", () => {
   it("serves the daemon's loopback port inside the pod with headers intact, including a streaming response", async () => {
     const seen: { auth?: string; url?: string }[] = [];
@@ -161,7 +213,7 @@ describe("loopback tunnel to the daemon's MCP servers", () => {
     const podPort = (probe.address() as AddressInfo).port;
     await new Promise((r) => probe.close(r));
 
-    const { kube } = await openSession({}, { inbox: { type: "http", url: `http://127.0.0.1:${podPort}/mcp`, headers: { authorization: "Bearer cap" } } }, { pod: podPort, daemon: daemonPort });
+    const { kube } = await openSession("sh", { inbox: { type: "http", url: `http://127.0.0.1:${podPort}/mcp`, headers: { authorization: "Bearer cap" } } }, { pod: podPort, daemon: daemonPort });
     await wait(async () => (await kube.as(["node", "-e", `require("net").connect(${podPort},"127.0.0.1").on("connect",()=>process.exit(0)).on("error",()=>process.exit(1))`])).code === 0);
     const out = await kube.as(["node", "-e", `fetch("http://127.0.0.1:${podPort}/mcp",{method:"POST",headers:{authorization:"Bearer cap"},body:"{}"}).then(async r=>{let t="";for await(const c of r.body)t+=Buffer.from(c).toString();console.log(r.status,t.replace(/\\n/g,"|"))})`]);
     expect(out.code, out.stderr).toBe(0);
@@ -174,7 +226,7 @@ describe("loopback tunnel to the daemon's MCP servers", () => {
     await new Promise<void>((r) => daemon.listen(0, "127.0.0.1", r));
     cleanups.push(() => daemon.close());
     const port = (daemon.address() as AddressInfo).port;
-    const { kube } = await openSession({}, {});
+    const { kube } = await openSession("sh", {});
     const r = await kube.as(["node", "-e", `require("net").connect(${port},"127.0.0.1").on("connect",()=>process.exit(0)).on("error",()=>process.exit(3))`]);
     // nothing listens inside the pod on that port, and the daemon's server is not reachable through the bridge
     expect([0, 3]).toContain(r.code);

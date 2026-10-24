@@ -1,120 +1,115 @@
-# paseo-kube-agents
+# paseo-kubernetes-runtime
 
-A Paseo provider plugin (`lerenn/kube-agents`) that runs each agent in its own Kubernetes pod, using
-[kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) (`Sandbox` CRD) instead of a custom operator.
-It knows nothing about roles; it only maps "an agent session" to "a pod".
+A Paseo plugin (`kubernetes-runtime`, shown as "Kubernetes Runtime") that runs a workspace in a Kubernetes pod:
+a **workspace runtime** for Paseo. The agents in that workspace are the real Claude and Codex agents (same provider,
+icon, catalog and pickers as local agents); only where their process runs changes. Pods are
+[kubernetes-sigs/agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) `Sandbox` objects, so there is no
+custom operator. It knows nothing about roles.
 
-Status: proof of concept, one agent per pod, developed against a fake cluster. Not yet run against the lab cluster.
+It needs a Paseo with workspace runtimes (the fork's `registerWorkspaceRuntime`). On a Paseo without them the plugin
+loads, shows its screen, and says it does nothing.
 
 ## How it works
 
 ```
 Paseo daemon                                   cluster (paseo-agents)
-┌──────────────────────────────┐               ┌───────────────────────────────┐
-│ provider "kube-agents"       │  kubectl apply│ Sandbox pka-<session>-<rand>  │
-│  connectKube()               │──────────────▶│  └ pod + RWO volume           │
-│   session.open               │  kubectl exec │      workspace from a bundle  │
-│   ├ apply Sandbox, wait Ready│──────────────▶│      claude-agent-acp  (ACP)  │
-│   ├ bundle the ref, seed pod │◀── ndjson ───▶│      bridge: push, tunnels    │
-│   └ SDK ACP runtime ◀────────┤   over stdio  └───────────────────────────────┘
-│  session.close → delete      │
+┌──────────────────────────────┐               ┌─────────────────────────────────┐
+│ runtime "kubernetes"         │  kubectl apply│ Sandbox pka-<repo>-<slug>-<rand>│
+│  prepare  (before a launch)  │──────────────▶│  └ pod + RWO volume             │
+│  exec     (the provider cmd) │  kubectl exec │      /workspace   (HOME, CLIs)  │
+│  beforeInput / onActivity    │◀─────────────▶│      <daemon path> = checkout   │
+│  destroy  (workspace archived│   stdio       │      claude / codex  (real)     │
+│  bridge: push, MCP tunnels   │               └─────────────────────────────────┘
 └──────────────────────────────┘
 ```
 
-- **Event relay**: no custom protocol. The pod runs an [ACP](https://agentclientprotocol.com) adapter
-  (`claude-agent-acp`, `codex-acp`, ...) and the daemon talks JSON-RPC over `kubectl exec -i` stdio.
-  The SDK's `runAcpProvider` turns ACP updates into the same provider events (`timeline.item`,
-  `session.turn`, permissions) the built-in providers emit. agent-sandbox ships the same pattern in `examples/agentclientprotocol`.
-  The SDK connector takes no arguments and is also used for capability probes, so kube-agents owns
-  the pod lifecycle itself (`server/connection.ts`) and hands the SDK a connector bound to the session's pod.
-- **Workspace**: seeded from the project's checkout on the daemon (below). Paseo is told the session cwd is still the daemon-local path.
-- **No GitHub access in the pod**: nothing is cloned from GitHub there and no GitHub token is a credential of the pod.
-  - *Seeding*: the daemon bundles the chosen ref from the project's own checkout (`git bundle`; fetching it first if the
-    daemon lacks it; a branch, a branch-off base or a pull request head) and streams it into the pod over `pods/exec`
-    stdin. The pod builds its workspace from the bundle, so unpushed local commits come along.
-  - *Pushing*: `git push` in the pod goes to a local "outbox" repo whose `pre-receive` hook asks the plugin, over a
-    bridge on the same `kubectl exec` channel, to push the new commits from the daemon with the daemon's own git
-    credentials. The agent sees an ordinary git result, including the remote's rejection. Only branch pushes are
-    accepted (no deletes, tags or other refs).
-  - *`gh` and GitHub tools*: pod agents are opted in to the GitHub Proxy plugin (`PASEO_GITHUB_PROXY=on`). Any loopback
-    URL in the agent's MCP config (`http://127.0.0.1:<port>`: GitHub Proxy, MCP Proxy, Agents Inbox, Leases, ...) is
-    tunnelled by port over the same channel, byte for byte, so URLs and bearer headers stay unchanged and streaming
-    works. Only the ports the session's config names are reachable, only on the daemon's loopback. Without the GitHub
-    Proxy plugin, `gh` explains that no GitHub access is configured. Plugins stay independent: nothing is imported.
-- **Credentials**: only `CLAUDE_CODE_OAUTH_TOKEN`, read from the Secret `paseo-agent-credentials` by reference
-  (never inline, never the whole Secret). Pods have no ServiceAccount token, run non-root, and have a hard
-  `shutdownTime` (default 8h) as a backstop for leaked pods.
-- **Opening a session is free**: Paseo opens many sessions that never run (drafts, feature previews, every agent
-  again after a daemon restart). The plugin answers the open from the provider catalog and creates the pod (or
-  resumes the suspended one) only when the first message arrives. Paseo is given a stable handle minted here; the
-  agent process's own session handle stays on the Sandbox, and the reopen waits until that session is really open
-  before delivering anything.
-- **Orphans**: every Sandbox and volume claim is labelled with the owning daemon id (`paseo.sh/daemon`, from
-  `~/.paseo/server-id`) and the Paseo agent id (`paseo.sh/agent`). A reconciler runs at plugin start and every 10
-  minutes, asks Paseo (`paseo agent inspect`) about each labelled agent, and deletes the Sandbox and claim of any
-  agent that no longer exists or is archived (grace 5 minutes, every deletion logged). It never lists another
-  daemon's resources; resources without a daemon label (made before labelling) are swept only when they match no
-  live agent and are 15 minutes old (setting "Remove unlabelled leftovers", on by default, turn it off where daemons
-  share a namespace). An agent in use has no expiry: its storage goes only on archive, or here. The screen shows
-  "Last reconcile: N orphans removed".
-- **Idle suspension**: an agent idle (no turn running, nothing waiting on a permission) for `podIdleMinutes`
-  (default 30, 0 = never) has its pod deleted with the Sandbox's `operatingMode: Suspended`; its volume, and the
-  agent's saved session handle, stay. Any input (a prompt, a steer from another plugin or agent) recreates the pod on
-  the same volume with the current image and settings, reopens the session from its handle, and then delivers the
-  message; inputs that arrive meanwhile queue behind the resume. If the pod cannot be scheduled (the volume is bound
-  to a zone with no capacity), the screen and the agent show why, the sandbox is released again, and the next input
-  retries. Closing the plugin suspends pods instead of deleting them; the agent's
-  sandbox is found again by a per-session label when Paseo reopens the session. Only archiving (or the reconciler, for a gone agent) deletes the volume.
-- **Warm pool** (off by default): `warmPool.size` pre-started Sandboxes (same image, settings and volume as a real
-  agent) so a new agent skips scheduling and volume binding. A new pod agent claims a ready one (relabelled to its
-  session) and is then seeded, tunnelled and credentialed as usual; the pool refills behind it. Pods built for old
-  settings (image, resources, placement, storage) are recycled. After `warmPool.idleMinutes` (default 60) with no
-  pod agent requested the pool scales to 0 so burst nodes can go; the next request wakes it and is itself cold.
-  Disabling the pool deletes it. Managed by the plugin: the agent-sandbox warm pool CRDs are not installed, and the
-  pool needs no verbs beyond the Sandbox ones the daemon already has. Warm pods are only for new agents: a resumed
-  agent needs its own volume, which is bound to its own zone. The Status section of the screen shows the pool
-  (active, or asleep since...) and each pod agent (running or suspended).
-- **Storage and restarts**: `/workspace` (the clone, plus `HOME` so the agent's session state) is a plain
-  ReadWriteOnce PVC from the Sandbox's `volumeClaimTemplates` (default 10Gi, default StorageClass; settable, or
-  `ephemeral` for an emptyDir). When the pod is lost (eviction, node loss, delete) the Sandbox controller
-  recreates it, the plugin waits for it (showing why if it cannot be scheduled), reuses the clone and reopens the
-  agent's session from its saved handle. A turn that was running is marked failed. Uncommitted work survives; an
-  ephemeral workspace loses it. Archiving deletes the Sandbox and its claim.
-- **Cleanup**: `session.close`, connection close, a failed start, and the shutdown backstop all delete the Sandbox.
+- **One pod per workspace**, created when the first provider process is about to start (`prepare`), never when a
+  workspace or a draft is merely opened. The Sandbox is labelled with the daemon id and the workspace id.
+- **Same path.** Paths inside provider protocols (claude's session files, codex's thread cwd) are the daemon's, so the
+  pod shows the checkout at the daemon's own absolute path: the volume is mounted at `/workspace` and its `checkout`
+  subPath again at that path (a root init container makes it writable for the agent user).
+- **Provider processes** run as `kubectl exec -i` with the exact command Paseo asks for. Their environment is the env
+  delta Paseo passes (written to a short-lived env file in the pod, never on a command line), nothing from the daemon.
+  `claude` and `codex` are installed on first use under `$HOME/.npm-global` (on the volume) if the image lacks them.
+- **Seeding.** The daemon first fetches the chosen ref fresh from origin (the branch picker's branch, the base of a
+  branch-off, a pull request head, or the checkout's own branch: the remote tip when the daemon's copy is behind, the
+  local tip when it has unpushed commits), then bundles it from the project's own checkout (`git bundle`) and streams
+  it into the pod over `pods/exec` stdin. Nothing is cloned from GitHub in the pod. The submodules recorded in the
+  seeded commit are checked out too, through the fetch bridge below.
+- **Fetch bridge (`git fetch`, `git pull`, `git submodule update`).** The pod has no GitHub credential. Git there is
+  pointed at local mirror repositories (a global `url.<mirror>.insteadOf`) for the project's origin and each
+  submodule, with `remote.origin.uploadpack` set to a wrapper that, before serving a fetch, asks the plugin over the
+  bridge to refresh the mirror: the daemon fetches the real remote with its own credentials and sends a thin pack of
+  only what the pod lacks. Branches, tags and the default branch come across; `origin/HEAD` resolves. Only the origin
+  and the submodules recorded in the project are fetchable (nothing else is reachable), and pushing to a submodule's
+  mirror is refused. Limits: 64MB per fetch, no nested submodules, pull request refs (`refs/pull/*`) are not mirrored.
+- **Push-back.** `git push` goes to a local "outbox" repository whose `pre-receive` hook asks the plugin, over the
+  same bridge, to push the new commits from the daemon with the daemon's git credentials (branches only, no
+  deletions). `gh` and GitHub tools go through the GitHub Proxy plugin if it is installed and the agent is opted in
+  (`PASEO_GITHUB_PROXY=on`, or its scope set to all).
+- **Loopback MCP servers** (`http://127.0.0.1:<port>`: GitHub Proxy, MCP Proxy, Inbox, Leases, ...) found in the
+  agent's MCP config at `prepare` are tunnelled by port, byte for byte, to the daemon's loopback over the same
+  channel: URLs and headers stay unchanged, streams work, and only the named ports are reachable.
+- **Credentials.** Only `CLAUDE_CODE_OAUTH_TOKEN`, from the Secret `paseo-agent-credentials`, by reference. Written from
+  the screen (write-only: server-side apply on the Secret; removal is a merge patch through `kubectl proxy`).
+- **Idle suspension.** When every agent of a workspace has been idle (no turn, no pending permission) for
+  `podIdleMinutes` (default 30, 0 = never) the pod is deleted (`operatingMode: Suspended`); the volume, with the
+  checkout and the agents' session state, stays. The next input (`beforeInput`) recreates the pod on the same volume with
+  the current image, and the provider resumes its own session. A process that ends because the pod went away is
+  reported as `runtime-lost`, so the agent run fails like any process exit and the next message relaunches it.
+- **Archive.** Archiving the workspace (`destroy`) deletes the Sandbox and its volume claim. There is no expiry on a
+  workspace's storage.
+- **Orphans.** A reconciler (at start, then every 10 minutes) deletes the Sandbox and claim of any workspace Paseo no
+  longer has (grace 5 minutes, every deletion logged); it only ever considers resources labelled with this daemon's id.
+  Old `pka-` sandboxes with no daemon label are swept after 15 minutes unless the "Remove unlabelled leftovers"
+  setting is off (turn it off where several daemons share a namespace). The screen shows "Last reconcile: N orphans
+  removed".
 
-## Settings UI
+## Finding a workspace's pod
 
-A sidebar item "Kube Agents" opens a screen (host-scoped plugin settings) with: namespace and image
-(Cluster), an Advanced section (kubectl context, node selector, tolerated taint keys, agent command) and a
-collapsible Credentials section with write-only fields. Sidebar position is controlled by the host (Settings > Sidebar lets the user reorder).
+Pods are named `pka-<repo>-<slug>-<random>` and labelled for people (values are sanitised to 63 characters; the full
+name is in the `paseo.sh/workspace-name` annotation). The labels are on the Sandbox, the pod and the volume claim and
+follow the workspace's agent, state and name:
 
-- **One pod configuration**: namespace, image (`image/Dockerfile` is the fat default: claude, codex, git, gh, node,
-  python, build tools), placement and resources. Named templates and warm pools were removed for now; settings saved
-  with templates are migrated (the old `default` template's values become the flat settings). Pods are rendered as
-  `Sandbox` objects directly.
-- **Credentials**: a write-only field for `CLAUDE_CODE_OAUTH_TOKEN`.
-  Values are write-only: the plugin server-side-applies them into the Secret `paseo-agent-credentials` (value sent on stdin,
-  not argv) and keeps only a local set / not set flag in `~/.paseo/kube-agents-credentials.json` (mode 0600).
-  The daemon has no `get` on the Secret, so the flag reflects what this plugin wrote.
-- **Inert until selected**: registering the provider makes no cluster call; pods are created only when an agent is
-  created with provider `kube-agents`.
+```bash
+kubectl -n paseo-agents get pods -L paseo.sh/workspace,paseo.sh/agent,paseo.sh/state,paseo.sh/repo
+```
+
+`paseo.sh/state` is `running` or `suspended` (a suspended workspace has no pod; its volume claim shows the state).
+`paseo.sh/workspace-id` and `paseo.sh/daemon` are what the orphan reconciler goes by. Updating the labels of an
+existing pod and claim needs `patch` on them in the daemon's Role; without it only the Sandbox's labels stay current.
+
+## Settings
+
+A sidebar item "Kubernetes Runtime" opens a screen: namespace and image; an Advanced section (kubectl context, node
+selector, tolerated taint keys, workspace storage mode/size/class, idle suspension, unlabelled sweep); a Status section
+(workspaces: running or suspended; last orphan cleanup); and a collapsible Credentials section with a write-only field
+for `CLAUDE_CODE_OAUTH_TOKEN`. New workspace gets a **Pod** location (with the branch picker) once the token is set.
+
+Settings and the credential flags that were kept under the plugin's old id `kube-agents` are copied over on first
+start (originals backed up under `~/.paseo/backups/`, never overwritten, never deleted).
 
 ## Cluster requirements
 
 See [docs/rbac-and-network.md](docs/rbac-and-network.md): Role for the daemon ServiceAccount, the credentials Secret,
-and the default-deny NetworkPolicy.
+storage and the default-deny NetworkPolicy.
 
-## Limits
+## Limits (phase 1 of the workspace runtime)
 
-Single catalog (no model list yet), no session listing/persistence, no `unarchive`, uncommitted local changes are not
-visible in the pod, agent env from Paseo is not forwarded (secrets come from the Secret only), and `kubectl` must be on the daemon's PATH.
+- Files, Git and terminals in the Paseo UI still read the **daemon's** checkout, not the pod's. Claude's own history
+  lives in the pod.
+- Model and version discovery runs on the daemon, so claude and codex must exist there too.
+- A provider that starts its processes inside the plugin process (opencode, pi, omp, plugin providers) is refused in a
+  runtime workspace.
+- No warm pool: the pod must mount the checkout at a path that is only known when the workspace is created.
+- Uncommitted local changes are not copied (the seed is a commit).
 
 ## Development
 
 ```bash
 npm ci
 npm run typecheck && npm test
-dagger call all        # same as CI: typecheck, test, build in a container
+dagger call all        # same as CI: typecheck, test, build in a container (with git, the tests run real git)
 ```
 
-CI is `.github/workflows/ci.yml` running the Dagger module in `.dagger/` (same layout as agents-roles).
+`server/runtime-types.ts` mirrors the fork's runtime contract until the published plugin SDK carries it.

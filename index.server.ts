@@ -1,63 +1,70 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { credentialsRemove, credentialsSet, credentialsStatus } from "./shared/credentials.js";
 import { ConfigSchema, kubeSettings } from "./shared/settings.js";
+import { kubeStatus } from "./shared/status.js";
+import { readDaemonId } from "./server/daemon.js";
 import { readStatus, removeCredential, setCredential } from "./server/credentials.js";
 import { Kubectl } from "./server/kube.js";
-import { createProvider } from "./server/provider.js";
-import { WarmPool } from "./server/pool.js";
-import { readDaemonId } from "./server/daemon.js";
-import { OrphanReaper, readLiveHandles } from "./server/orphans.js";
+import { migrateLegacyData } from "./server/migrate.js";
+import { OrphanReaper } from "./server/orphans.js";
 import { PodRegistry } from "./server/registry.js";
-import { kubeStatus } from "./shared/status.js";
+import { KubernetesRuntime } from "./server/runtime.js";
+import type { WorkspaceRuntimeRegistration } from "./server/runtime-types.js";
 
 export default function contribute(server: PluginServerContext) {
+  // Before the settings are read: bring over what the plugin kept under its former id, `kube-agents`.
+  try {
+    const moved = migrateLegacyData();
+    if (moved.copied.length) console.log(`[kubernetes-runtime] migrated ${moved.copied.join(", ")} from kube-agents (backup: ${moved.backup})`);
+  } catch (error) {
+    console.log(`[kubernetes-runtime] could not migrate data from kube-agents: ${(error as Error).message}`);
+  }
+
   const settings = server.registerSettings(kubeSettings);
   const getConfig = async () => {
     const state = await settings.read();
-    if (state.status !== "ready") throw new Error(`kube-agents settings are invalid: ${state.error}`);
+    if (state.status !== "ready") throw new Error(`Kubernetes Runtime settings are invalid: ${state.error}`);
     return ConfigSchema.parse(state.values);
   };
-
+  const kubeFor = (c: { context?: string; namespace: string }) => new Kubectl({ context: c.context, namespace: c.namespace });
   const registry = new PodRegistry();
   const daemonId = readDaemonId();
-  const kubeFor = (c: { context?: string; namespace: string }) => new Kubectl({ context: c.context, namespace: c.namespace });
-  const pool = new WarmPool({
-    daemonId,
-    getConfig,
-    kubeFor,
-  });
-  pool.start();
+
+  const runtime = new KubernetesRuntime({ getConfig, kubeFor, daemonId, registry });
+  // The workspace runtime API is in Paseo's fork; on a Paseo without it the plugin still loads (settings, credentials) and says why it does nothing.
+  const registerRuntime = (server as unknown as { registerWorkspaceRuntime?: (r: WorkspaceRuntimeRegistration) => void }).registerWorkspaceRuntime;
+  if (typeof registerRuntime === "function") {
+    registerRuntime.call(server, runtime.registration());
+    void runtime.start();
+  } else {
+    console.log("[kubernetes-runtime] this Paseo has no workspace runtimes; update Paseo to run workspaces in pods");
+  }
+
   const reaper = new OrphanReaper({
     getConfig,
     kubeFor,
     daemonId,
-    liveHandles: async () => readLiveHandles(),
     activeSandboxes: () => new Set(registry.list().map((p) => p.sandbox)),
+    onNames: (names) => runtime.syncNames(names),
   });
   reaper.start();
-  // The agent id is not part of a provider session; hand it over in the session env so sandboxes can be labelled.
-  server.before("agent.session_open", ({ request }) =>
-    request.provider === "kube-agents" ? { ...request, env: { ...request.env, PASEO_KUBE_AGENT_ID: request.agentId } } : undefined,
-  );
-  server.registerProvider(createProvider(getConfig, { pool, registry, daemonId }));
-  server.handle(kubeStatus, async () => ({
-    pool: await pool.status(),
-    reaper: reaper.current(),
-    pods: registry.list().map((p) => ({ sessionId: p.sessionId, sandbox: p.sandbox, state: p.state, since: new Date(p.since).toISOString() })),
-  }));
+
   server.handle(credentialsStatus, () => ({ set: readStatus() }));
   server.handle(credentialsSet, async ({ key, value }) => {
     const config = await getConfig();
-    const kube = new Kubectl({ context: config.context, namespace: config.namespace });
-    return { set: await setCredential(kube, config.credentialsSecret, key, value) };
+    return { set: await setCredential(kubeFor(config), config.credentialsSecret, key, value) };
   });
   server.handle(credentialsRemove, async ({ key }) => {
     const config = await getConfig();
-    const kube = new Kubectl({ context: config.context, namespace: config.namespace });
-    return { set: await removeCredential(kube, config.credentialsSecret, key) };
+    return { set: await removeCredential(kubeFor(config), config.credentialsSecret, key) };
   });
+  server.handle(kubeStatus, async () => ({
+    reaper: reaper.current(),
+    pods: registry.list().map((p) => ({ workspaceId: p.workspaceId, sandbox: p.sandbox, state: p.state, since: new Date(p.since).toISOString() })),
+  }));
+
   return () => {
-    pool.stop();
+    runtime.stop();
     reaper.stop();
   };
 }

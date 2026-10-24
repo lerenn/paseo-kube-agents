@@ -1,6 +1,15 @@
 import { spawn } from "node:child_process";
-import type { Readable } from "node:stream";
+import type { Readable, Writable } from "node:stream";
 import type { AcpStream, AcpStreamMessage } from "@getpaseo/plugin/server/acp";
+
+export interface PodProcess {
+  stdin: Writable;
+  stdout: Readable;
+  stderr: Readable;
+  /** Resolves when the exec ends (the process, or the connection to the pod). */
+  exit: Promise<{ code: number | null; signal: string | null }>;
+  kill(signal?: string): void;
+}
 
 export interface PodInfo {
   uid: string;
@@ -79,6 +88,8 @@ export interface Kube {
   exec(pod: string, argv: string[]): Promise<ExecResult>;
   /** Merge-patches a Sandbox (suspend, resume, claim from the pool). */
   patchSandbox(name: string, patch: Record<string, unknown>): Promise<void>;
+  /** Sets labels and annotations on a pod or volume claim (`kubectl label/annotate --overwrite`). */
+  label(kind: "pod" | "pvc", name: string, labels: Record<string, string>, annotations?: Record<string, string>): Promise<void>;
   /** Sandboxes matching a label selector. */
   listSandboxes(selector: string): Promise<SandboxInfo[]>;
   /** Volume claims matching a label selector (all claims in the namespace when omitted). */
@@ -87,6 +98,8 @@ export interface Kube {
   execInput(pod: string, argv: string[], input: Readable): Promise<ExecResult>;
   /** Long-lived stdio JSON-RPC (ndjson) stream to a process inside the pod. */
   execStream(pod: string, argv: string[]): AcpStream;
+  /** A process in the pod with raw stdio, for the provider processes Paseo asks the runtime to start. */
+  spawnExec(pod: string, argv: string[]): PodProcess;
   delete(kind: string, name: string): Promise<void>;
   readonly namespace: string;
   /**
@@ -223,6 +236,21 @@ export class Kubectl implements Kube {
     });
   }
 
+  spawnExec(pod: string, argv: string[]): PodProcess {
+    const child = spawn(this.binary, [...this.base, "exec", "-i", pod, "--", ...argv], { stdio: ["pipe", "pipe", "pipe"] });
+    const exit = new Promise<{ code: number | null; signal: string | null }>((resolve) => {
+      child.on("error", () => resolve({ code: 127, signal: null }));
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    return {
+      stdin: child.stdin!,
+      stdout: child.stdout!,
+      stderr: child.stderr!,
+      exit,
+      kill: (signal) => void child.kill((signal as NodeJS.Signals | undefined) ?? "SIGTERM"),
+    };
+  }
+
   execStream(pod: string, argv: string[]): AcpStream {
     const child = spawn(this.binary, [...this.base, "exec", "-i", pod, "--", ...argv], {
       stdio: ["pipe", "pipe", "inherit"],
@@ -239,6 +267,13 @@ export class Kubectl implements Kube {
 
   async patchSandbox(name: string, patch: Record<string, unknown>): Promise<void> {
     await this.ok(["patch", "sandbox", name, "--type=merge", "-p", JSON.stringify(patch)]);
+  }
+
+  async label(kind: "pod" | "pvc", name: string, labels: Record<string, string>, annotations: Record<string, string> = {}): Promise<void> {
+    await this.ok(["label", kind, name, "--overwrite", ...Object.entries(labels).map(([k, v]) => `${k}=${v}`)]);
+    if (Object.keys(annotations).length) {
+      await this.ok(["annotate", kind, name, "--overwrite", ...Object.entries(annotations).map(([k, v]) => `${k}=${v}`)]);
+    }
   }
 
   async listSandboxes(selector: string): Promise<SandboxInfo[]> {
