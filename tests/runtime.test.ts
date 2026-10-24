@@ -195,7 +195,7 @@ describe("inherited runtimes and command execs", () => {
     const proc = await exec({ interactive: true });
     expect(proc).toBeTruthy();
     expect(t.kube.applied).toHaveLength(1); // an interactive command started the pod
-    expect(t.kube.execs.some((e) => e.argv.join(" ").includes("command -v"))).toBe(false); // git is not a provider CLI
+    expect(t.kube.execs.some((e) => e.argv.join(" ").includes('command -v "$1"'))).toBe(false); // git is not a provider CLI
     t.advance(31 * MIN);
     await t.tick();
     await expect(exec({ interactive: false })).rejects.toThrow(/background refreshes/);

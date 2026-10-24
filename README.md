@@ -30,7 +30,8 @@ Paseo daemon                                   cluster (paseo-agents)
   subPath again at that path (a root init container makes it writable for the agent user).
 - **Provider processes** run as `kubectl exec -i` with the exact command Paseo asks for. Their environment is the env
   delta Paseo passes (written to a short-lived env file in the pod, never on a command line), nothing from the daemon.
-  `claude` and `codex` are installed on first use under `$HOME/.npm-global` (on the volume) if the image lacks them.
+  `claude` and `codex` are installed on first use under `$HOME/.npm-global` (on the volume) if the image lacks them, and so is a
+  checksum-verified `jq` (under `$HOME/bin`) for `gh --jq` and for agents; the default image already has it.
 - **Seeding.** The daemon first fetches the chosen ref fresh from origin (the branch picker's branch, the base of a
   branch-off, a pull request head, or the checkout's own branch: the remote tip when the daemon's copy is behind, the
   local tip when it has unpushed commits), then bundles it from the project's own checkout (`git bundle`) and streams

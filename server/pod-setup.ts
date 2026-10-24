@@ -118,3 +118,28 @@ export async function ensureCommand(kube: Kube, pod: string, command: string): P
   const installed = await kube.exec(pod, ["sh", "-c", 'npm install -g --prefix "$HOME/.npm-global" "$1" >/dev/null 2>&1', "sh", pkg]);
   if (installed.code !== 0) throw new Error(`could not install ${pkg} in the pod: ${installed.stderr.trim() || "npm failed"}`);
 }
+
+const JQ_VERSION = "1.7.1";
+/** SHA-256 of the jq release binaries, so the download is verified. */
+const JQ_SHA256 = {
+  amd64: "5942c9b0934e510ee61eb3e30273f1b3fe2590df93933a93d7c58b81d19c8ff5",
+  arm64: "4dd2d8a0661df0b22f1bb9a1f9830f06b6f3b8f7d91211a1ef5d7c4f06a8b4a5",
+};
+
+const JQ_SCRIPT = `command -v jq >/dev/null 2>&1 && exit 0
+[ -x "$HOME/bin/jq" ] && exit 0
+case "$(uname -m)" in x86_64) a=amd64; s=${JQ_SHA256.amd64};; aarch64|arm64) a=arm64; s=${JQ_SHA256.arm64};; *) exit 0;; esac
+mkdir -p "$HOME/bin"
+t="$HOME/bin/jq.download"
+curl -fsSL -o "$t" "https://github.com/jqlang/jq/releases/download/jq-${JQ_VERSION}/jq-linux-$a" || { rm -f "$t"; exit 0; }
+echo "$s  $t" | sha256sum -c - >/dev/null 2>&1 || { rm -f "$t"; exit 0; }
+chmod 755 "$t" && mv "$t" "$HOME/bin/jq"
+`;
+
+/**
+ * `jq` for the `gh --jq` shim and for agents: a stock image such as node:22 lacks it, so a verified static binary is
+ * put in the volume's `bin` once. Best effort: a pod without internet access simply stays without.
+ */
+export async function ensureJq(kube: Kube, pod: string): Promise<void> {
+  await kube.exec(pod, ["sh", "-c", JQ_SCRIPT]).catch(() => undefined);
+}
