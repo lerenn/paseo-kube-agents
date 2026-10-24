@@ -226,3 +226,120 @@ export const INSTALLABLE_CLIS: Readonly<Record<string, string>> = {
   claude: "@anthropic-ai/claude-code",
   codex: "@openai/codex",
 };
+
+/**
+ * File operations for the Files panel, run in the pod with one JSON request on stdin and one JSON answer on stdout.
+ * Every path is confined to the workspace directory (symlinks that leave it are refused). Errors begin with the
+ * POSIX code, as Paseo expects (ENOENT, EEXIST, ECONFLICT).
+ */
+export const FS_SCRIPT = String.raw`import fs from "node:fs";
+import path from "node:path";
+import crypto from "node:crypto";
+
+let input = "";
+for await (const c of process.stdin) input += c;
+const req = JSON.parse(input);
+
+const fail = (code, message) => { const e = new Error(code + ": " + message); e.code = code; throw e; };
+const rootReal = fs.realpathSync(req.root);
+const inside = (p) => p === rootReal || p.startsWith(rootReal + path.sep);
+
+// Resolves a path through its deepest existing ancestor, so a new file can be checked before it exists.
+const confine = (p) => {
+  if (typeof p !== "string" || !path.isAbsolute(p)) fail("EINVAL", "paths must be absolute");
+  const abs = path.resolve(p);
+  let existing = abs;
+  const rest = [];
+  while (!fs.existsSync(existing) && !isLink(existing)) {
+    rest.unshift(path.basename(existing));
+    const up = path.dirname(existing);
+    if (up === existing) break;
+    existing = up;
+  }
+  let real;
+  try { real = fs.realpathSync(existing); } catch { fail("ENOENT", abs); }
+  const out = path.join(real, ...rest);
+  if (!inside(out)) fail("EACCES", abs + " is outside the workspace");
+  return out;
+};
+function isLink(p) { try { fs.lstatSync(p); return true; } catch { return false; } }
+
+const statOf = (s) => ({ kind: s.isFile() ? "file" : s.isDirectory() ? "directory" : "other", size: s.size, mtimeMs: s.mtimeMs, mode: s.mode & 0o7777 });
+const statPath = (p) => { try { return statOf(fs.statSync(p)); } catch (e) { if (e.code === "ENOENT" || e.code === "ENOTDIR") return null; throw e; } };
+
+try {
+const target = confine(req.path);
+let result = null;
+switch (req.op) {
+  case "stat":
+    result = statPath(target);
+    break;
+  case "readdir": {
+    const entries = [];
+    let names;
+    try { names = fs.readdirSync(target); } catch (e) { fail(e.code || "EIO", req.path); }
+    for (const name of names) {
+      const full = path.join(target, name);
+      try {
+        if (!inside(fs.realpathSync(full))) continue;
+        entries.push({ name, ...statOf(fs.statSync(full)) });
+      } catch { /* vanished or dangling */ }
+    }
+    result = entries;
+    break;
+  }
+  case "read": {
+    let fd;
+    try { fd = fs.openSync(target, "r"); } catch (e) { fail(e.code || "EIO", req.path); }
+    try {
+      const size = fs.fstatSync(fd).size;
+      const offset = req.offset ?? 0;
+      const length = req.length ?? Math.max(0, size - offset);
+      const buf = Buffer.alloc(length);
+      const n = fs.readSync(fd, buf, 0, length, offset);
+      result = { data: buf.subarray(0, n).toString("base64") };
+    } finally { fs.closeSync(fd); }
+    break;
+  }
+  case "write": {
+    const data = Buffer.from(req.data, "base64");
+    const before = statPath(target);
+    if (req.exclusive && before) fail("EEXIST", req.path);
+    if (req.expectedMtimeMs !== undefined && before && Math.abs(before.mtimeMs - req.expectedMtimeMs) > 1) fail("ECONFLICT", req.path + " changed since it was read");
+    const mode = req.mode ?? (before ? before.mode : 0o644);
+    if (req.exclusive) {
+      fs.writeFileSync(target, data, { flag: "wx", mode });
+    } else {
+      const tmp = path.join(path.dirname(target), "." + path.basename(target) + "." + crypto.randomBytes(4).toString("hex") + ".tmp");
+      fs.writeFileSync(tmp, data, { mode });
+      fs.chmodSync(tmp, mode);
+      fs.renameSync(tmp, target);
+    }
+    result = statPath(target);
+    break;
+  }
+  case "mkdir":
+    try { fs.mkdirSync(target); } catch (e) { fail(e.code || "EIO", req.path); }
+    break;
+  case "rename": {
+    const to = confine(req.to);
+    try { fs.renameSync(target, to); } catch (e) { fail(e.code || "EIO", req.path); }
+    break;
+  }
+  case "copy": {
+    const to = confine(req.to);
+    try { fs.cpSync(target, to, { recursive: true, errorOnExist: true, force: false }); } catch (e) { fail(e.code || "EIO", req.path); }
+    break;
+  }
+  case "remove":
+    if (target === rootReal) fail("EACCES", "the workspace directory itself cannot be removed");
+    try { fs.rmSync(target, { recursive: !!req.recursive, force: false }); } catch (e) { fail(e.code || "EIO", req.path); }
+    break;
+  default:
+    fail("EINVAL", "unknown operation " + req.op);
+}
+process.stdout.write(JSON.stringify({ ok: true, result }));
+} catch (e) {
+  process.stdout.write(JSON.stringify({ ok: false, error: String(e.message || e) }));
+}
+`;

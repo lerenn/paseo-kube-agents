@@ -1,4 +1,4 @@
-// The workspace runtime contract of the Paseo fork (workspace runtimes, phase 1), copied here because the
+// The workspace runtime contract of the Paseo fork (workspace runtimes), copied here because the
 // published plugin SDK does not carry it yet. Delete this file and import from "@getpaseo/plugin/server" once it does.
 import type { Readable, Writable } from "node:stream";
 import type { JsonValue } from "@getpaseo/protocol/agent-types";
@@ -31,6 +31,8 @@ export interface WorkspaceRuntimeDescription {
 export interface WorkspaceRuntimeWorkspaceRequest {
   workspaceId: string;
   options?: WorkspaceRuntimeOptions;
+  /** The workspace directory on the daemon. Sent with `create` and `mapCwd`. */
+  cwd?: string;
 }
 
 export interface WorkspaceRuntimeStatus {
@@ -38,7 +40,7 @@ export interface WorkspaceRuntimeStatus {
   message?: string;
 }
 
-export type WorkspaceRuntimeProcessPurpose = "session" | "probe";
+export type WorkspaceRuntimeProcessPurpose = "session" | "probe" | "command";
 
 export interface WorkspaceRuntimeExecRequest extends WorkspaceRuntimeWorkspaceRequest {
   agentId?: string;
@@ -46,9 +48,15 @@ export interface WorkspaceRuntimeExecRequest extends WorkspaceRuntimeWorkspaceRe
   provider?: string;
   /**
    * "session" drives an agent. "probe" only reads provider metadata (models, version) and must
-   * not create or resume a sandbox.
+   * not create or resume a sandbox. "command" is a short tool Paseo runs for the workspace (Git
+   * today) and does not call `prepare` first.
    */
   purpose: WorkspaceRuntimeProcessPurpose;
+  /**
+   * For "command": the user is waiting on the result. Paseo sets it false for background
+   * refreshes, which must not resume a suspended sandbox; reject them instead.
+   */
+  interactive?: boolean;
   /** Executable and arguments, exactly as the provider asked to run them. The image must contain it. */
   argv: [string, ...string[]];
   /** Working directory on the daemon. Map it to the runtime's own path. */
@@ -104,6 +112,62 @@ export interface WorkspaceRuntimeContext {
   notice(message: string, level?: "info" | "warning" | "error"): void;
 }
 
+export interface WorkspaceRuntimeFsStat {
+  /** `stat` follows symlinks, so a link to a file reports "file". */
+  kind: "file" | "directory" | "other";
+  size: number;
+  mtimeMs: number;
+  /** Unix permission bits, kept when a file is rewritten. */
+  mode?: number;
+}
+
+export interface WorkspaceRuntimeFsEntry extends WorkspaceRuntimeFsStat {
+  name: string;
+}
+
+export interface WorkspaceRuntimeFsRequest extends WorkspaceRuntimeWorkspaceRequest {
+  /** An absolute path inside the runtime, under the directory `mapCwd` returned. */
+  path: string;
+}
+
+/**
+ * The files of a workspace inside the runtime. Every method must confine its path to the
+ * workspace directory and reject a symlink that leaves it. Errors start with the POSIX code
+ * (`ENOENT: ...`, `EEXIST: ...`) so Paseo can tell "missing" and "exists" from a failure.
+ */
+export interface WorkspaceRuntimeFileSystem {
+  /** Null when the path does not exist. */
+  stat(
+    request: WorkspaceRuntimeFsRequest,
+  ): WorkspaceRuntimeFsStat | null | Promise<WorkspaceRuntimeFsStat | null>;
+  /** The entries of a directory with their stats; skip entries that vanish or dangle. */
+  readdir(
+    request: WorkspaceRuntimeFsRequest,
+  ): WorkspaceRuntimeFsEntry[] | Promise<WorkspaceRuntimeFsEntry[]>;
+  /** `length` omitted reads to the end. */
+  read(
+    request: WorkspaceRuntimeFsRequest & { offset?: number; length?: number },
+  ): Uint8Array | Promise<Uint8Array>;
+  /**
+   * Replace or create a file atomically, keeping `mode` (default 0o644 for a new file). With
+   * `exclusive` it fails with EEXIST instead of replacing. With `expectedMtimeMs` it fails with
+   * `ECONFLICT` when the file changed since.
+   */
+  write(
+    request: WorkspaceRuntimeFsRequest & {
+      data: Uint8Array;
+      mode?: number;
+      exclusive?: boolean;
+      expectedMtimeMs?: number;
+    },
+  ): WorkspaceRuntimeFsStat | Promise<WorkspaceRuntimeFsStat>;
+  /** Fails with EEXIST when the path exists. */
+  mkdir(request: WorkspaceRuntimeFsRequest): void | Promise<void>;
+  rename(request: WorkspaceRuntimeFsRequest & { to: string }): void | Promise<void>;
+  remove(request: WorkspaceRuntimeFsRequest & { recursive?: boolean }): void | Promise<void>;
+  copy(request: WorkspaceRuntimeFsRequest & { to: string }): void | Promise<void>;
+}
+
 export interface WorkspaceRuntimeRegistration {
   /** Lowercase letters, digits, ".", "_" and "-". Workspaces reference the runtime by this id. */
   id: string;
@@ -111,6 +175,18 @@ export interface WorkspaceRuntimeRegistration {
   /** SVG file inside the plugin directory. Apps show it wherever a workspace shows its location. */
   icon?: string;
   describe(): WorkspaceRuntimeDescription | Promise<WorkspaceRuntimeDescription>;
+  /**
+   * Where the workspace directory is inside the runtime. Paseo rewrites the daemon path to this
+   * one in the process's argv, environment, working directory and protocol lines, and rewrites
+   * it back in what the process prints, so the UI keeps seeing daemon paths. Omit it when the
+   * runtime shows the workspace at the daemon's own path.
+   */
+  mapCwd?(request: WorkspaceRuntimeWorkspaceRequest & { cwd: string }): string | Promise<string>;
+  /**
+   * The workspace's files inside the runtime. Without it the workspace's Files panel is
+   * unavailable. Paseo polls for changes, since a runtime has no watch.
+   */
+  fs?: WorkspaceRuntimeFileSystem;
   /** Materialize the workspace. Idempotent. */
   create?(
     request: WorkspaceRuntimeWorkspaceRequest,

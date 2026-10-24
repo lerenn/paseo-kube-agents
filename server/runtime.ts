@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import type { Readable } from "node:stream";
+import { Readable } from "node:stream";
 import { parseRuntimeOptions, type RuntimeOptions } from "../shared/runtime-options.js";
 import { applyFetch, fetchTargets, pushToMirror, type FetchTarget } from "./mirrors.js";
 import { applyPush, loopbackPorts, startBridge, type RunningBridge } from "./bridge.js";
@@ -14,6 +14,10 @@ import type {
   WorkspaceRuntimeActivityEvent,
   WorkspaceRuntimeContext,
   WorkspaceRuntimeExecRequest,
+  WorkspaceRuntimeFileSystem,
+  WorkspaceRuntimeFsEntry,
+  WorkspaceRuntimeFsRequest,
+  WorkspaceRuntimeFsStat,
   WorkspaceRuntimeInputRequest,
   WorkspaceRuntimePrepareRequest,
   WorkspaceRuntimeProcess,
@@ -89,6 +93,8 @@ interface WorkspaceState {
   notice?: WorkspaceRuntimeContext["notice"];
   /** Remotes the pod may fetch from (the project's origin and its submodules), served through the bridge. */
   targets: FetchTarget[];
+  /** The directory came from the workspace itself (`create`'s cwd or the Sandbox), not from options an inherited runtime copied. */
+  cwdFixed?: boolean;
   /** What the Sandbox, pod and claim were last labelled with, so they are only patched when it changes. */
   repo?: string;
   repoUrl?: string;
@@ -155,6 +161,7 @@ export class KubernetesRuntime {
       if (!id || !cwd || this.states.has(id)) continue;
       const ws = this.newState(id, { cwd });
       ws.sandbox = sandbox.name;
+      ws.cwdFixed = true;
       this.setPhase(ws, sandbox.operatingMode === "Suspended" ? "suspended" : "running");
     }
   }
@@ -177,9 +184,20 @@ export class KubernetesRuntime {
   }
 
   private workspace(request: WorkspaceRuntimeWorkspaceRequest): WorkspaceState {
-    const options = parseRuntimeOptions(request.options);
-    const ws = this.states.get(request.workspaceId) ?? this.newState(request.workspaceId, options);
-    ws.options = options;
+    const given = parseRuntimeOptions(request.options);
+    let ws = this.states.get(request.workspaceId);
+    // A workspace that inherited its runtime from the caller comes with the caller's options; its own directory is
+    // what `create` was told, so that wins, and the caller's branch choice and name do not apply to it.
+    if (request.cwd && request.cwd !== given.cwd && !ws?.cwdFixed) {
+      const options: RuntimeOptions = { cwd: request.cwd, slug: slugFor(request.cwd), ref: null };
+      ws ??= this.newState(request.workspaceId, options);
+      ws.options = options;
+      ws.cwdFixed = true;
+      return ws;
+    }
+    ws ??= this.newState(request.workspaceId, given);
+    if (request.cwd) ws.cwdFixed = true;
+    ws.options = ws.cwdFixed ? { ...given, cwd: ws.options.cwd, slug: ws.options.slug, ref: ws.options.ref, title: ws.options.title ?? given.title } : given;
     return ws;
   }
 
@@ -347,6 +365,45 @@ export class KubernetesRuntime {
     }
   }
 
+  /** The workspace's files, served from the pod. Only while the pod runs: polling must not keep it awake or wake it. */
+  private fileSystem(): WorkspaceRuntimeFileSystem {
+    const call = async (request: WorkspaceRuntimeFsRequest, op: string, extra: Record<string, unknown> = {}): Promise<unknown> => {
+      const ws = this.workspace(request);
+      const config = await this.deps.getConfig();
+      const kube = this.deps.kubeFor(config);
+      const info = ws.sandbox && ws.phase === "running" ? await kube.podInfo(ws.sandbox).catch(() => null) : null;
+      if (!ws.sandbox || !info?.ready || info.terminating) {
+        throw new Error("EAGAIN: the pod is not running (suspended or not started yet); it starts with the next message to an agent");
+      }
+      const payload = Buffer.from(JSON.stringify({ op, root: ws.options.cwd, path: request.path, ...extra }));
+      const run = () => kube.execInput(ws.sandbox!, ["sh", "-c", 'exec node "$HOME/fs.mjs"'], Readable.from([payload]));
+      let r = await run();
+      if (r.code !== 0 && /Cannot find module/.test(r.stderr)) {
+        await installAssets(kube, ws.sandbox);
+        r = await run();
+      }
+      let out: { ok: boolean; error?: string; result?: unknown };
+      try {
+        out = JSON.parse(r.stdout);
+      } catch {
+        throw new Error(`EIO: the pod could not run the file operation: ${scrub(r.stderr.trim()) || "no answer"}`);
+      }
+      if (!out.ok) throw new Error(out.error ?? "EIO: file operation failed");
+      return out.result;
+    };
+    return {
+      stat: async (r) => ((await call(r, "stat")) as WorkspaceRuntimeFsStat | null) ?? null,
+      readdir: async (r) => (await call(r, "readdir")) as WorkspaceRuntimeFsEntry[],
+      read: async (r) => new Uint8Array(Buffer.from(((await call(r, "read", { offset: r.offset, length: r.length })) as { data: string }).data, "base64")),
+      write: async (r) =>
+        (await call(r, "write", { data: Buffer.from(r.data).toString("base64"), mode: r.mode, exclusive: r.exclusive, expectedMtimeMs: r.expectedMtimeMs })) as WorkspaceRuntimeFsStat,
+      mkdir: async (r) => void (await call(r, "mkdir")),
+      rename: async (r) => void (await call(r, "rename", { to: r.to })),
+      remove: async (r) => void (await call(r, "remove", { recursive: r.recursive })),
+      copy: async (r) => void (await call(r, "copy", { to: r.to })),
+    };
+  }
+
   private meta(ws: WorkspaceState, state: MetaState): PodMeta {
     return {
       workspaceName: ws.options.title ?? ws.options.slug ?? ws.id,
@@ -434,6 +491,7 @@ export class KubernetesRuntime {
       beforeInput: (request, ctx) => this.beforeInput(request, ctx),
       onActivity: (event) => this.onActivity(event),
       exec: (request, ctx) => this.exec(request, ctx),
+      fs: this.fileSystem(),
     };
   }
 
@@ -534,8 +592,12 @@ export class KubernetesRuntime {
   async exec(request: WorkspaceRuntimeExecRequest, ctx: WorkspaceRuntimeContext & { signal: AbortSignal }): Promise<WorkspaceRuntimeProcess> {
     const ws = this.workspace(request);
     if (request.purpose === "probe") throw new Error("Probes run on the daemon host; the Kubernetes Runtime does not start them");
+    // Git and other short tools Paseo runs for the workspace. A background refresh must not wake a suspended pod.
+    if (request.purpose === "command" && request.interactive === false && ws.phase !== "running") {
+      throw new Error("The pod is not running; background refreshes do not wake it");
+    }
     ws.notice = ctx.notice;
-    await this.serial(ws, () => this.ensureReady(ws, this.detached(ws, ctx), { command: request.argv[0], env: request.env }));
+    await this.serial(ws, () => this.ensureReady(ws, this.detached(ws, ctx), { command: request.purpose === "command" ? undefined : request.argv[0], env: request.env }));
     const config = await this.deps.getConfig();
     const kube = this.deps.kubeFor(config);
     const pod = ws.sandbox!;
@@ -568,4 +630,10 @@ export class KubernetesRuntime {
       }),
     };
   }
+}
+
+/** A workspace slug from a directory name (for labelling and pod names of workspaces that inherited a runtime). */
+function slugFor(cwd: string): string {
+  const base = cwd.split("/").filter(Boolean).pop() ?? "workspace";
+  return base.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^[^A-Za-z0-9]+/, "").slice(0, 63) || "workspace";
 }

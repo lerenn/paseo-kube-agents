@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -200,6 +200,41 @@ describe("fetching through the daemon (real git, real pod scripts)", () => {
     const del = await kube.as(["git", "push", "origin", ":pod-branch"], { cwd: lib });
     expect(del.code).not.toBe(0);
     expect(del.stderr).toMatch(/not supported/);
+  });
+});
+
+describe("the Files panel through the runtime (real node script)", () => {
+  it("reads, writes, lists and refuses paths that leave the workspace", async () => {
+    const { project, runtime } = await openSession();
+    const fs = runtime.registration().fs!;
+    const ask = (path: string, extra: object = {}) => ({ workspaceId: "wks_1", options: { cwd: project, slug: "brave-otter-12", ref: null }, path, ...extra }) as never;
+    const file = join(project, "docs", "note.txt");
+
+    await fs.mkdir(ask(join(project, "docs")));
+    await expect(fs.mkdir(ask(join(project, "docs")))).rejects.toThrow(/^EEXIST/);
+    const written = await fs.write(ask(file, { data: new TextEncoder().encode("hello"), exclusive: true }));
+    expect(written).toMatchObject({ kind: "file", size: 5, mode: 0o644 });
+    await expect(fs.write(ask(file, { data: new TextEncoder().encode("x"), exclusive: true }))).rejects.toThrow(/^EEXIST/);
+    await expect(fs.write(ask(file, { data: new TextEncoder().encode("y"), expectedMtimeMs: written.mtimeMs - 5000 }))).rejects.toThrow(/^ECONFLICT/);
+    const replaced = await fs.write(ask(file, { data: new TextEncoder().encode("hello world"), expectedMtimeMs: written.mtimeMs }));
+    expect(replaced.size).toBe(11);
+    expect(new TextDecoder().decode(await fs.read(ask(file, { offset: 6 })))).toBe("world");
+    expect((await fs.readdir(ask(join(project, "docs")))).map((e) => e.name)).toEqual(["note.txt"]);
+    expect(await fs.stat(ask(join(project, "missing")))).toBeNull();
+    await expect(fs.read(ask(join(project, "missing")))).rejects.toThrow(/^ENOENT/);
+
+    await fs.copy(ask(file, { to: join(project, "docs", "copy.txt") }));
+    await fs.rename(ask(join(project, "docs", "copy.txt"), { to: join(project, "docs", "moved.txt") }));
+    await fs.remove(ask(join(project, "docs"), { recursive: true }));
+    expect(await fs.stat(ask(join(project, "docs")))).toBeNull();
+
+    // confinement: outside paths, relative paths, and a symlink out of the workspace
+    await expect(fs.read(ask("/etc/hostname"))).rejects.toThrow(/^EACCES/);
+    await expect(fs.stat(ask("docs/x"))).rejects.toThrow(/^EINVAL/);
+    symlinkSync("/etc", join(project, "escape"));
+    await expect(fs.readdir(ask(join(project, "escape")))).rejects.toThrow(/^EACCES/);
+    await expect(fs.write(ask(join(project, "escape", "pwn"), { data: new Uint8Array([1]) }))).rejects.toThrow(/^EACCES/);
+    await expect(fs.remove(ask(project, { recursive: true }))).rejects.toThrow(/^EACCES/);
   });
 });
 
